@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Dynamic Wallpaper Manager</string>
+    <string name="live_wallpaper_label">Dynamic Wallpaper Service</string>
+    <string name="wallpaper_description">Automated dynamic wallpaper that changes based on location, time, and custom screen gestures.</string>
+</resources>
