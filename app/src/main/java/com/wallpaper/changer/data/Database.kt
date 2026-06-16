@@ -26,11 +26,20 @@ interface AlbumDao {
 
 @Dao
 interface PhotoDao {
-    @Query("SELECT * FROM photos WHERE albumId = :albumId")
+    @Query("SELECT * FROM photos WHERE albumId = :albumId ORDER BY isFavorite DESC, displayOrder ASC, id ASC")
     fun getPhotosForAlbumFlow(albumId: Long): Flow<List<Photo>>
 
-    @Query("SELECT * FROM photos WHERE albumId = :albumId")
+    @Query("SELECT * FROM photos WHERE albumId = :albumId ORDER BY isFavorite DESC, displayOrder ASC, id ASC")
     suspend fun getPhotosForAlbum(albumId: Long): List<Photo>
+
+    @Query("SELECT * FROM photos WHERE albumId = :albumId ORDER BY isFavorite DESC, displayOrder ASC, id ASC LIMIT :limit")
+    suspend fun getPhotosForAlbumLimit(albumId: Long, limit: Int): List<Photo>
+
+    @Query("SELECT * FROM photos WHERE isFavorite = 1")
+    suspend fun getFavoritePhotos(): List<Photo>
+
+    @Query("SELECT * FROM photos WHERE isFavorite = 1")
+    fun getFavoritePhotosFlow(): Flow<List<Photo>>
 
     @Query("SELECT * FROM photos")
     suspend fun getAllPhotos(): List<Photo>
@@ -47,8 +56,17 @@ interface PhotoDao {
     @Query("DELETE FROM photos WHERE albumId = :albumId")
     suspend fun deletePhotosForAlbum(albumId: Long)
 
+    @Update
+    suspend fun update(photo: Photo)
+
     @Delete
     suspend fun delete(photo: Photo)
+
+    @Query("UPDATE photos SET wasSeen = :wasSeen WHERE id = :id")
+    suspend fun updateWasSeen(id: Long, wasSeen: Boolean)
+
+    @Query("UPDATE photos SET wasSeen = 0 WHERE id IN (:ids)")
+    suspend fun resetSeen(ids: List<Long>)
 }
 
 @Dao
@@ -124,7 +142,7 @@ interface AppSettingDao {
 
 @Database(
     entities = [Album::class, Photo::class, AutomationRule::class, NodeEntity::class, ConnectionEntity::class, AppSetting::class],
-    version = 5,
+    version = 11,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

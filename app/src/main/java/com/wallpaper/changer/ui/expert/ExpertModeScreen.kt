@@ -4,11 +4,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Help
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -22,32 +24,31 @@ import kotlinx.coroutines.launch
 @Composable
 fun ExpertModeScreen(database: AppDatabase) {
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
     
     var yamlText by remember { mutableStateOf("") }
-    var albums by remember { mutableStateOf(emptyList<Album>()) }
+    val rulesFlow by database.automationRuleDao().getAllRulesFlow().collectAsState(initial = emptyList())
+    val albumsFlow by database.albumDao().getAllFlow().collectAsState(initial = emptyList())
     
     var validationError by remember { mutableStateOf<String?>(null) }
     var validationSuccess by remember { mutableStateOf(false) }
 
-    fun refreshYaml() {
-        scope.launch {
-            albums = database.albumDao().getAll()
-            val rules = database.automationRuleDao().getAllRules()
-            yamlText = YamlParser.serialize(rules, albums)
-            validationError = null
-            validationSuccess = true
-        }
-    }
+    var lastSerializedYaml by remember { mutableStateOf("") }
 
-    LaunchedEffect(Unit) {
-        refreshYaml()
+    // Sync editor with database rules and albums
+    LaunchedEffect(rulesFlow, albumsFlow) {
+        val serialized = YamlParser.serialize(rulesFlow, albumsFlow)
+        if (yamlText == lastSerializedYaml || yamlText.isBlank()) {
+            yamlText = serialized
+        }
+        lastSerializedYaml = serialized
     }
 
     // Trigger validation when text changes
-    LaunchedEffect(yamlText) {
+    LaunchedEffect(yamlText, albumsFlow) {
         if (yamlText.isBlank()) return@LaunchedEffect
         try {
-            YamlParser.parse(yamlText, albums)
+            YamlParser.parse(yamlText, albumsFlow)
             validationError = null
             validationSuccess = true
         } catch (e: Exception) {
@@ -67,28 +68,70 @@ fun ExpertModeScreen(database: AppDatabase) {
                 Text("Configure all rules and priorities as text.", style = MaterialTheme.typography.bodySmall)
             }
             
-            Button(
-                onClick = {
-                    if (validationSuccess) {
-                        scope.launch {
-                            try {
-                                val parsedRules = YamlParser.parse(yamlText, albums)
-                                database.automationRuleDao().deleteAll()
-                                database.automationRuleDao().insertAll(parsedRules)
-                                refreshYaml()
-                            } catch (e: Exception) {
-                                validationError = e.message
-                                validationSuccess = false
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                var showHelpDialog by remember { mutableStateOf(false) }
+
+                if (showHelpDialog) {
+                    com.wallpaper.changer.ui.RuleHelpDialog(onDismiss = { showHelpDialog = false })
+                }
+
+                IconButton(onClick = { showHelpDialog = true }) {
+                    Icon(
+                        imageVector = Icons.Default.Help,
+                        contentDescription = "Help",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Button(
+                    onClick = {
+                        if (validationSuccess) {
+                            scope.launch {
+                                try {
+                                    val parsedRules = YamlParser.parse(yamlText, albumsFlow)
+                                    database.automationRuleDao().deleteAll()
+                                    database.automationRuleDao().insertAll(parsedRules)
+                                    // Mirror back to flowchart
+                                    com.wallpaper.changer.automation.FlowchartSync.sync(database)
+                                    // Notify service
+                                    context.startService(android.content.Intent(context, com.wallpaper.changer.automation.AutomationService::class.java))
+                                } catch (e: Exception) {
+                                    validationError = e.message
+                                    validationSuccess = false
+                                }
                             }
                         }
-                    }
-                },
-                enabled = validationSuccess,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF689F38))
-            ) {
-                Icon(Icons.Default.PlayArrow, contentDescription = "Apply")
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Apply Payload")
+                    },
+                    enabled = validationSuccess,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = "Apply")
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Apply Payload")
+                }
+            }
+        }
+
+        // Informational source-of-truth banner card
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "Source of Truth Notice",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Expert Mode is the source of truth for rules. All changes made in Easy Mode or Hobbyist Mode will automatically update this YAML file. Applying changes here will overwrite the active rules engine configuration.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
             }
         }
 
@@ -177,6 +220,10 @@ fun ExpertModeScreen(database: AppDatabase) {
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+        val successColor = if (isDark) Color(0xFF81C784) else Color(0xFF2E7D32)
+        val successBg = if (isDark) Color(0xFF1B5E20).copy(alpha = 0.25f) else Color(0xFFE8F5E9)
+
         // Editor
         OutlinedTextField(
             value = yamlText,
@@ -188,7 +235,7 @@ fun ExpertModeScreen(database: AppDatabase) {
                 lineHeight = 16.sp
             ),
             colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = if (validationSuccess) Color(0xFF689F38) else Color(0xFFE57373)
+                focusedBorderColor = if (validationSuccess) successColor else MaterialTheme.colorScheme.error
             ),
             placeholder = { Text("rules:\n  - name: Rule\n    type: Time\n    priority: 1\n    ...") }
         )
@@ -200,12 +247,12 @@ fun ExpertModeScreen(database: AppDatabase) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFFFFEBEE), shape = MaterialTheme.shapes.small)
+                    .background(MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.small)
                     .padding(8.dp)
             ) {
                 Text(
                     text = "Lint Error: ${validationError!!}",
-                    color = Color(0xFFC62828),
+                    color = MaterialTheme.colorScheme.onErrorContainer,
                     fontSize = 12.sp
                 )
             }
@@ -213,12 +260,12 @@ fun ExpertModeScreen(database: AppDatabase) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFFE8F5E9), shape = MaterialTheme.shapes.small)
+                    .background(successBg, shape = MaterialTheme.shapes.small)
                     .padding(8.dp)
             ) {
                 Text(
                     text = "YAML Syntax Valid",
-                    color = Color(0xFF2E7D32),
+                    color = successColor,
                     fontSize = 12.sp
                 )
             }

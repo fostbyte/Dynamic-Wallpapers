@@ -110,4 +110,40 @@ class YamlParserTest {
         assertEquals("10:00", parsedRule.time)
         assertEquals(37.7833, parsedRule.latitude ?: 0.0, 0.0001)
     }
+
+    @Test
+    fun testWifiRules() {
+        val albums = listOf(
+            Album(id = 1, name = "Megan"),
+            Album(id = 2, name = "Work")
+        )
+
+        val rules = listOf(
+            AutomationRule(
+                id = 15,
+                name = "Connect Home WiFi",
+                type = "WiFi",
+                priority = 8,
+                wifiState = "Connecting",
+                wifiSsid = "Home_WiFi",
+                actionType = "SwitchAlbum",
+                targetAlbumId = 1
+            )
+        )
+
+        // 1. Serialize
+        val yamlString = YamlParser.serialize(rules, albums)
+        assertTrue(yamlString.contains("Connect Home WiFi"))
+        assertTrue(yamlString.contains("wifi_state: Connecting"))
+        assertTrue(yamlString.contains("wifi_ssid: Home_WiFi"))
+
+        // 2. Parse back
+        val parsedRules = YamlParser.parse(yamlString, albums)
+        assertEquals(1, parsedRules.size)
+        val parsedRule = parsedRules[0]
+        assertEquals("Connect Home WiFi", parsedRule.name)
+        assertEquals("WiFi", parsedRule.type)
+        assertEquals("Connecting", parsedRule.wifiState)
+        assertEquals("Home_WiFi", parsedRule.wifiSsid)
+    }
 }

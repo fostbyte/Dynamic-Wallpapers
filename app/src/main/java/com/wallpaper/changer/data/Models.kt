@@ -37,7 +37,10 @@ data class Photo(
     val path: String, // File path (local hidden path, or web URL)
     val scalingOverride: String = "None", // "None", "Fill", "Stretch", "Fit"
     val isOnline: Boolean = false,
-    val cachePath: String? = null
+    val cachePath: String? = null,
+    val isFavorite: Boolean = false,
+    val displayOrder: Int = 0,
+    val wasSeen: Boolean = false
 )
 
 @Entity(tableName = "automation_rules")
@@ -72,7 +75,21 @@ data class AutomationRule(
     val randomOrder: Boolean = false,
     
     // Gesture triggers: gesture type (e.g. "DoubleTap", "TripleTap")
-    val gestureType: String? = null
+    val gestureType: String? = null,
+    
+    // Extra conditions
+    val timeCondition: String? = "At",
+    val locationCondition: String? = "Entering",
+    
+    // Visual effects (0-100 values)
+    val dimmingPercent: Int? = null,
+    val blurPercent: Int? = null,
+    val greyscalePercent: Int? = null,
+    
+    // WiFi triggers: WiFi state ("Connecting", "Disconnecting"), SSID name (optional)
+    val wifiState: String? = null,
+    val wifiSsid: String? = null,
+    val playFavoritesOnly: Boolean = false
 )
 
 @Entity(tableName = "nodes")

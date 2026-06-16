@@ -44,6 +44,10 @@ import androidx.lifecycle.Lifecycle
 import android.app.WallpaperManager
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.graphics.toArgb
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import com.wallpaper.changer.ui.getOriginalDisplayName
+import com.wallpaper.changer.ui.copyUriToInternal
 
 import com.wallpaper.changer.automation.AutomationService
 import com.wallpaper.changer.data.AppDatabase
@@ -57,10 +61,56 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
+    private val sharedUrisState = mutableStateOf<List<Uri>?>(null)
+
+    private fun getSharedUris(intent: Intent?): List<Uri>? {
+        if (intent == null) return null
+        val action = intent.action
+        val type = intent.type
+        if (type?.startsWith("image/") == true) {
+            if (Intent.ACTION_SEND == action) {
+                val imageUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                }
+                if (imageUri != null) {
+                    return listOf(imageUri)
+                }
+            } else if (Intent.ACTION_SEND_MULTIPLE == action) {
+                val imageUris = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+                }
+                if (imageUris != null) {
+                    return imageUris.filterNotNull()
+                }
+            }
+        }
+        return null
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val sharedUris = getSharedUris(intent)
+        if (sharedUris != null) {
+            sharedUrisState.value = sharedUris
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
         val database = (application as WallpaperChangerApplication).database
+        
+        val sharedUris = getSharedUris(intent)
+        if (sharedUris != null) {
+            sharedUrisState.value = sharedUris
+        }
         
         // Auto-start Automation Service when MainActivity opens to ensure rules run
         try {
@@ -136,11 +186,22 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(
                 colorScheme = colors
             ) {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    MainNavigationContainer(database)
+                Box(modifier = Modifier.fillMaxSize()) {
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = MaterialTheme.colorScheme.background
+                    ) {
+                        MainNavigationContainer(database)
+                    }
+
+                    val sharedUris by sharedUrisState
+                    if (sharedUris != null) {
+                        ShareImportDialog(
+                            sharedUris = sharedUris!!,
+                            database = database,
+                            onDismiss = { sharedUrisState.value = null }
+                        )
+                    }
                 }
             }
         }
@@ -409,6 +470,17 @@ fun SettingsScreen(database: AppDatabase) {
     var globalRotateUnit by remember { mutableStateOf("Minutes") }
     var appTheme by remember { mutableStateOf("System") }
     val gestureActions = remember { mutableStateMapOf<String, String>() }
+    var gesturesInUse by remember { mutableStateOf(emptySet<String>()) }
+    var changeOnUnlock by remember { mutableStateOf(false) }
+    var changeOnHomeScreen by remember { mutableStateOf(false) }
+    var batterySaverScreenOff by remember { mutableStateOf(false) }
+
+    var globalDimmingEnabled by remember { mutableStateOf(false) }
+    var globalDimmingPercent by remember { mutableStateOf(0) }
+    var globalBlurEnabled by remember { mutableStateOf(false) }
+    var globalBlurPercent by remember { mutableStateOf(0) }
+    var globalGreyscaleEnabled by remember { mutableStateOf(false) }
+    var globalGreyscalePercent by remember { mutableStateOf(0) }
 
     val wallpaperManager = remember { WallpaperManager.getInstance(context) }
     var isWallpaperActive by remember { mutableStateOf(false) }
@@ -442,6 +514,30 @@ fun SettingsScreen(database: AppDatabase) {
             val themeSet = database.appSettingDao().getSetting("app_theme")
             appTheme = themeSet?.value ?: "System"
 
+            val unlockSet = database.appSettingDao().getSetting("change_on_unlock")
+            changeOnUnlock = unlockSet?.value == "true"
+
+            val homeSet = database.appSettingDao().getSetting("change_on_homescreen")
+            changeOnHomeScreen = homeSet?.value == "true"
+
+            val batterySaverSet = database.appSettingDao().getSetting("battery_saver_screen_off")
+            batterySaverScreenOff = batterySaverSet?.value == "true"
+
+            val dimmingEnabledSet = database.appSettingDao().getSetting("global_dimming_enabled")
+            globalDimmingEnabled = dimmingEnabledSet?.value == "true"
+            val dimmingPercentSet = database.appSettingDao().getSetting("global_dimming_percent")
+            globalDimmingPercent = dimmingPercentSet?.value?.toIntOrNull() ?: 0
+
+            val blurEnabledSet = database.appSettingDao().getSetting("global_blur_enabled")
+            globalBlurEnabled = blurEnabledSet?.value == "true"
+            val blurPercentSet = database.appSettingDao().getSetting("global_blur_percent")
+            globalBlurPercent = blurPercentSet?.value?.toIntOrNull() ?: 0
+
+            val greyscaleEnabledSet = database.appSettingDao().getSetting("global_greyscale_enabled")
+            globalGreyscaleEnabled = greyscaleEnabledSet?.value == "true"
+            val greyscalePercentSet = database.appSettingDao().getSetting("global_greyscale_percent")
+            globalGreyscalePercent = greyscalePercentSet?.value?.toIntOrNull() ?: 0
+
             listOf("DoubleTap", "TwoFingerDoubleTap", "ThreeFingerDoubleTap").forEach { gesture ->
                 val key = "gesture_$gesture"
                 val setting = database.appSettingDao().getSetting(key)
@@ -452,6 +548,9 @@ fun SettingsScreen(database: AppDatabase) {
                     else -> "None"
                 }
             }
+
+            val activeGestureRules = database.automationRuleDao().getAllRules().filter { it.isEnabled && it.type == "Gesture" }
+            gesturesInUse = activeGestureRules.mapNotNull { it.gestureType }.toSet()
 
             allFilesAccessGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 Environment.isExternalStorageManager()
@@ -508,6 +607,8 @@ fun SettingsScreen(database: AppDatabase) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Button(
                         onClick = {
+                            // User-triggered action only. Android requires explicit user intervention via ACTION_CHANGE_LIVE_WALLPAPER
+                            // activity intent. We ensure the app never redirects or prompts setting itself automatically on start/boot.
                             val intent = Intent().apply {
                                 action = android.app.WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER
                                 putExtra(
@@ -517,7 +618,7 @@ fun SettingsScreen(database: AppDatabase) {
                             }
                             context.startActivity(intent)
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF689F38))
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                     ) {
                         Text("Set Live Wallpaper")
                     }
@@ -525,64 +626,42 @@ fun SettingsScreen(database: AppDatabase) {
             }
         }
 
-        // App Theme Selector Card
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("App Theme", style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    listOf("System" to "System Default", "Light" to "Light Mode", "Dark" to "Dark Mode").forEach { (themeKey, label) ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.clickable {
-                                appTheme = themeKey
-                                scope.launch {
-                                    database.appSettingDao().insertSetting(AppSetting("app_theme", themeKey))
-                                }
+        if (!allFilesAccessGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Storage Permission Required",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "To access wallpapers in hidden folders (starting with '.') or directories containing '.nomedia' files, please grant All Files Access in system settings.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                data = Uri.parse("package:${context.packageName}")
                             }
-                        ) {
-                            RadioButton(
-                                selected = appTheme == themeKey,
-                                onClick = {
-                                    appTheme = themeKey
-                                    scope.launch {
-                                        database.appSettingDao().insertSetting(AppSetting("app_theme", themeKey))
-                                    }
-                                }
-                            )
-                            Text(label, style = MaterialTheme.typography.bodyMedium)
-                        }
+                            try {
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                val intentFallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                                context.startActivity(intentFallback)
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text("Grant All Files Access")
                     }
                 }
             }
-        }
-
-        // 3. Cache toggle
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Cache Online Sources", style = MaterialTheme.typography.titleMedium)
-                Text("Cache files from online sources locally on disk.", style = MaterialTheme.typography.bodySmall)
-            }
-            Switch(
-                checked = cacheOnlineSources,
-                onCheckedChange = { checked ->
-                    cacheOnlineSources = checked
-                    scope.launch {
-                        database.appSettingDao().insertSetting(AppSetting("cache_online_sources", checked.toString()))
-                    }
-                }
-            )
         }
 
         // Global Random Order
@@ -605,6 +684,190 @@ fun SettingsScreen(database: AppDatabase) {
                 }
             )
         }
+
+        // Change Photo on Unlock
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Change Photo on Unlock", style = MaterialTheme.typography.titleMedium)
+                Text("Rotate wallpaper automatically when the device is unlocked.", style = MaterialTheme.typography.bodySmall)
+            }
+            Switch(
+                checked = changeOnUnlock,
+                onCheckedChange = { checked ->
+                    changeOnUnlock = checked
+                    scope.launch {
+                        database.appSettingDao().insertSetting(AppSetting("change_on_unlock", checked.toString()))
+                    }
+                }
+            )
+        }
+
+        // Change Photo on Home Screen
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Change Photo on Home Screen", style = MaterialTheme.typography.titleMedium)
+                Text("Rotate wallpaper automatically when navigating back to the home screen.", style = MaterialTheme.typography.bodySmall)
+            }
+            Switch(
+                checked = changeOnHomeScreen,
+                onCheckedChange = { checked ->
+                    changeOnHomeScreen = checked
+                    scope.launch {
+                        database.appSettingDao().insertSetting(AppSetting("change_on_homescreen", checked.toString()))
+                    }
+                }
+            )
+        }
+
+        HorizontalDivider()
+
+        Text("Global Effects Overrides", style = MaterialTheme.typography.titleMedium)
+        Text("Force visual effects globally across all active wallpaper rules.", style = MaterialTheme.typography.bodySmall)
+
+        // Global Dimming
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Global Dimming", style = MaterialTheme.typography.bodyMedium)
+                }
+                Switch(
+                    checked = globalDimmingEnabled,
+                    onCheckedChange = { checked ->
+                        globalDimmingEnabled = checked
+                        scope.launch {
+                            database.appSettingDao().insertSetting(AppSetting("global_dimming_enabled", checked.toString()))
+                            context.startService(Intent(context, AutomationService::class.java))
+                        }
+                    }
+                )
+            }
+            if (globalDimmingEnabled) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Slider(
+                        value = globalDimmingPercent.toFloat(),
+                        onValueChange = { newValue ->
+                            globalDimmingPercent = newValue.toInt()
+                            scope.launch {
+                                database.appSettingDao().insertSetting(AppSetting("global_dimming_percent", newValue.toInt().toString()))
+                                context.startService(Intent(context, AutomationService::class.java))
+                            }
+                        },
+                        valueRange = 0f..100f,
+                        steps = 99,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text("${globalDimmingPercent}%", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(45.dp))
+                }
+            }
+        }
+
+        // Global Blur
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Global Blur", style = MaterialTheme.typography.bodyMedium)
+                }
+                Switch(
+                    checked = globalBlurEnabled,
+                    onCheckedChange = { checked ->
+                        globalBlurEnabled = checked
+                        scope.launch {
+                            database.appSettingDao().insertSetting(AppSetting("global_blur_enabled", checked.toString()))
+                            context.startService(Intent(context, AutomationService::class.java))
+                        }
+                    }
+                )
+            }
+            if (globalBlurEnabled) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Slider(
+                        value = globalBlurPercent.toFloat(),
+                        onValueChange = { newValue ->
+                            globalBlurPercent = newValue.toInt()
+                            scope.launch {
+                                database.appSettingDao().insertSetting(AppSetting("global_blur_percent", newValue.toInt().toString()))
+                                context.startService(Intent(context, AutomationService::class.java))
+                            }
+                        },
+                        valueRange = 0f..100f,
+                        steps = 99,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text("${globalBlurPercent}%", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(45.dp))
+                }
+            }
+        }
+
+        // Global Greyscale
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Global Greyscale", style = MaterialTheme.typography.bodyMedium)
+                }
+                Switch(
+                    checked = globalGreyscaleEnabled,
+                    onCheckedChange = { checked ->
+                        globalGreyscaleEnabled = checked
+                        scope.launch {
+                            database.appSettingDao().insertSetting(AppSetting("global_greyscale_enabled", checked.toString()))
+                            context.startService(Intent(context, AutomationService::class.java))
+                        }
+                    }
+                )
+            }
+            if (globalGreyscaleEnabled) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Slider(
+                        value = globalGreyscalePercent.toFloat(),
+                        onValueChange = { newValue ->
+                            globalGreyscalePercent = newValue.toInt()
+                            scope.launch {
+                                database.appSettingDao().insertSetting(AppSetting("global_greyscale_percent", newValue.toInt().toString()))
+                                context.startService(Intent(context, AutomationService::class.java))
+                            }
+                        },
+                        valueRange = 0f..100f,
+                        steps = 99,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text("${globalGreyscalePercent}%", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(45.dp))
+                }
+            }
+        }
+
+        HorizontalDivider()
 
         // 4. Override active status
         Row(
@@ -715,50 +978,6 @@ fun SettingsScreen(database: AppDatabase) {
                             }
                         }
                     }
-                }
-            }
-        }
-
-        HorizontalDivider()
-
-        // 4.2 Google Photos & Media Access Settings Card
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("Google Photos & Media Access", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Manage storage permissions (Allow All, Limited Access, or None).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                
-                val hasImagesPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
-                val hasVisualSelectionPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
-                } else {
-                    false
-                }
-                
-                val accessText = when {
-                    hasImagesPermission -> "Allow All (Full Access)"
-                    hasVisualSelectionPermission -> "Limited Access (User Selected)"
-                    else -> "None (Access Denied)"
-                }
-                
-                Text("Current Access: $accessText", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-                Spacer(modifier = Modifier.height(12.dp))
-                Button(
-                    onClick = {
-                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                            data = Uri.fromParts("package", context.packageName, null)
-                        }
-                        context.startActivity(intent)
-                    }
-                ) {
-                    Text("Change Photo Access")
                 }
             }
         }
@@ -881,10 +1100,7 @@ fun SettingsScreen(database: AppDatabase) {
             val actionOptions = listOf(
                 "NextPhoto" to "Next Photo",
                 "LastPhoto" to "Last Photo",
-                "NextAlbum" to "Next Album",
-                "LastAlbum" to "Last Album",
-                "Freeze" to "Freeze / Resume",
-                "Custom" to "Custom Rules Trigger",
+                "Freeze" to "Play/Pause Photo Rotations",
                 "None" to "None (Disabled)"
             )
 
@@ -903,7 +1119,11 @@ fun SettingsScreen(database: AppDatabase) {
                         "ThreeFingerDoubleTap" -> "NextPhoto"
                         else -> "None"
                     }
-                    val displayActionName = actionOptions.find { it.first == currentAction }?.second ?: "Next Photo"
+                    val displayActionName = if (gesturesInUse.contains(gestureKey)) {
+                        "Custom Controls"
+                    } else {
+                        actionOptions.find { it.first == currentAction }?.second ?: "Next Photo"
+                    }
                     
                     Box {
                         Text(
@@ -936,5 +1156,184 @@ fun SettingsScreen(database: AppDatabase) {
                 }
             }
         }
+
+        HorizontalDivider()
+
+        // App Theme Selector Card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("App Theme", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf("System" to "System Default", "Light" to "Light Mode", "Dark" to "Dark Mode").forEach { (themeKey, label) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    appTheme = themeKey
+                                    scope.launch {
+                                        database.appSettingDao().insertSetting(AppSetting("app_theme", themeKey))
+                                    }
+                                }
+                                .padding(vertical = 4.dp)
+                        ) {
+                            RadioButton(
+                                selected = appTheme == themeKey,
+                                onClick = {
+                                    appTheme = themeKey
+                                    scope.launch {
+                                        database.appSettingDao().insertSetting(AppSetting("app_theme", themeKey))
+                                    }
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(label, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+            }
+        }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ShareImportDialog(
+    sharedUris: List<Uri>,
+    database: AppDatabase,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    
+    var albums by remember { mutableStateOf(emptyList<com.wallpaper.changer.data.Album>()) }
+    var selectedAlbumId by remember { mutableStateOf<Long?>(null) }
+    var newAlbumName by remember { mutableStateOf("") }
+    
+    var isImporting by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        albums = database.albumDao().getAll()
+        if (albums.isNotEmpty()) {
+            selectedAlbumId = albums.first().id
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Import Shared Photo(s)") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("You shared ${sharedUris.size} photo(s). Select an existing album or create a new one below:")
+                
+                if (albums.isNotEmpty()) {
+                    Text("Select Album:", style = MaterialTheme.typography.titleSmall)
+                    var expanded by remember { mutableStateOf(false) }
+                    val selectedAlbumName = albums.find { it.id == selectedAlbumId }?.name ?: "Select Album"
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { expanded = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(selectedAlbumName)
+                        }
+                        DropdownMenu(
+                            expanded = expanded,
+                            onDismissRequest = { expanded = false }
+                        ) {
+                            albums.forEach { album ->
+                                DropdownMenuItem(
+                                    text = { Text(album.name) },
+                                    onClick = {
+                                        selectedAlbumId = album.id
+                                        newAlbumName = ""
+                                        expanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                
+                Text("Or Create New Album:", style = MaterialTheme.typography.titleSmall)
+                OutlinedTextField(
+                    value = newAlbumName,
+                    onValueChange = {
+                        newAlbumName = it
+                        if (it.isNotBlank()) {
+                            selectedAlbumId = null
+                        }
+                    },
+                    placeholder = { Text("Enter new album name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                
+                if (isImporting) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !isImporting && (selectedAlbumId != null || newAlbumName.isNotBlank()),
+                onClick = {
+                    isImporting = true
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            val albumId = if (newAlbumName.isNotBlank()) {
+                                database.albumDao().insert(com.wallpaper.changer.data.Album(name = newAlbumName.trim()))
+                            } else {
+                                selectedAlbumId!!
+                            }
+                            
+                            val photos = sharedUris.mapNotNull { uri ->
+                                val name = getOriginalDisplayName(context, uri)
+                                val localPath = copyUriToInternal(context, uri, name)
+                                if (localPath != null) {
+                                    com.wallpaper.changer.data.Photo(albumId = albumId, path = localPath)
+                                } else {
+                                    null
+                                }
+                            }
+                            database.photoDao().insertAll(photos)
+                            
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(context, "Successfully imported ${photos.size} photo(s)!", Toast.LENGTH_SHORT).show()
+                                isImporting = false
+                                onDismiss()
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(context, "Failed to import photos: ${e.message}", Toast.LENGTH_LONG).show()
+                                isImporting = false
+                            }
+                        }
+                    }
+                }
+            ) {
+                Text("Import")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                enabled = !isImporting,
+                onClick = onDismiss
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
 }
