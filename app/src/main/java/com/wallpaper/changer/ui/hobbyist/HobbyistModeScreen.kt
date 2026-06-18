@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Help
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Lock
 import com.wallpaper.changer.ui.easy.rememberWifiSsids
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -37,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wallpaper.changer.data.*
 import com.wallpaper.changer.ui.easy.MapPickerWebView
+import com.wallpaper.changer.ui.SafeFolderUnlockDialog
 import kotlinx.coroutines.launch
 import org.yaml.snakeyaml.Yaml
 import kotlin.math.roundToInt
@@ -84,6 +86,9 @@ fun HobbyistModeScreen(database: AppDatabase) {
     var nodes by remember { mutableStateOf(emptyList<Node>()) }
     var connections by remember { mutableStateOf(emptyList<Connection>()) }
     var albums by remember { mutableStateOf(emptyList<Album>()) }
+    var unlockedAlbumIds by remember { mutableStateOf(emptySet<Long>()) }
+    var albumToUnlock by remember { mutableStateOf<Album?>(null) }
+    var pendingAlbumChange by remember { mutableStateOf<(() -> Unit)?>(null) }
     
     // Tap to connect tracking state
     var selectedPortNode by remember { mutableStateOf<String?>(null) }
@@ -280,7 +285,7 @@ fun HobbyistModeScreen(database: AppDatabase) {
                             "NOT Gate" to "Not",
                             "Change Wallpaper" to "NextWallpaper",
                             "Switch Album" to "SwitchAlbum",
-                            "Rotate Favorites" to "RotateFavorites",
+                            "Shuffle Favorites" to "ShuffleFavorites",
                             "Random Order" to "RandomOrder"
                         )
                         nodeTypes.forEach { (label, type) ->
@@ -428,6 +433,11 @@ fun HobbyistModeScreen(database: AppDatabase) {
                         node = node,
                         albums = albums,
                         scale = scale,
+                        unlockedAlbumIds = unlockedAlbumIds,
+                        onRequestUnlock = { album, onUnlocked ->
+                            pendingAlbumChange = onUnlocked
+                            albumToUnlock = album
+                        },
                         onPositionChanged = { newX, newY ->
                             nodes = nodes.map {
                                 if (it.id == node.id) it.copy(x = newX, y = newY) else it
@@ -519,6 +529,24 @@ fun HobbyistModeScreen(database: AppDatabase) {
                 }
             }
         }
+
+        albumToUnlock?.let { album ->
+            SafeFolderUnlockDialog(
+                albumName = album.name,
+                lockType = album.lockType ?: "PIN",
+                lockValue = album.lockValue,
+                onUnlocked = {
+                    unlockedAlbumIds = unlockedAlbumIds + album.id
+                    albumToUnlock = null
+                    pendingAlbumChange?.invoke()
+                    pendingAlbumChange = null
+                },
+                onCancel = {
+                    albumToUnlock = null
+                    pendingAlbumChange = null
+                }
+            )
+        }
     }
 }
 
@@ -546,6 +574,8 @@ fun NodeCard(
     node: Node,
     albums: List<Album>,
     scale: Float,
+    unlockedAlbumIds: Set<Long>,
+    onRequestUnlock: (Album, () -> Unit) -> Unit,
     onPositionChanged: (Float, Float) -> Unit,
     onTimeChanged: (String, String, String) -> Unit,
     onLocationChanged: (String, String, String, String) -> Unit,
@@ -612,7 +642,7 @@ fun NodeCard(
                 // Input Ports Column/Box on the Left
                 val inputPorts = when (node.type) {
                     "And", "Or", "Xor" -> listOf("In 1", "In 2")
-                    "Not", "NextWallpaper", "SwitchAlbum", "RotateFavorites", "RandomOrder" -> listOf("In")
+                    "Not", "NextWallpaper", "SwitchAlbum", "RotateFavorites", "ShuffleFavorites", "RandomOrder" -> listOf("In")
                     else -> emptyList()
                 }
                 
@@ -934,23 +964,42 @@ fun NodeCard(
                             DropdownMenu(expanded = expandedDropdown, onDismissRequest = { expandedDropdown = false }) {
                                 albums.forEach { alb ->
                                     val isChecked = selectedIds.contains(alb.id) || (selectedIds.isEmpty() && alb.id == node.albumId)
+                                    val isLocked = alb.isHidden && !unlockedAlbumIds.contains(alb.id)
+                                    val displayName = if (isLocked) "vaulted-${alb.name.take(4).lowercase()}..." else alb.name
                                     DropdownMenuItem(
                                         text = {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 Checkbox(checked = isChecked, onCheckedChange = null)
                                                 Spacer(modifier = Modifier.width(4.dp))
-                                                Text(alb.name, fontSize = 10.sp)
+                                                Text(displayName, fontSize = 10.sp)
+                                                if (isLocked) {
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Icon(
+                                                        Icons.Default.Lock,
+                                                        contentDescription = "Locked",
+                                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        modifier = Modifier.size(12.dp)
+                                                    )
+                                                }
                                             }
                                         },
                                         onClick = {
-                                            val newIds = if (isChecked) {
-                                                selectedIds - alb.id
-                                            } else {
-                                                selectedIds + alb.id
+                                            val action = {
+                                                val newIds = if (isChecked) {
+                                                    selectedIds - alb.id
+                                                } else {
+                                                    selectedIds + alb.id
+                                                }
+                                                val newIdsStr = newIds.joinToString(",")
+                                                val firstId = newIds.firstOrNull() ?: 0L
+                                                onAlbumIdsChanged(firstId, newIdsStr)
                                             }
-                                            val newIdsStr = newIds.joinToString(",")
-                                            val firstId = newIds.firstOrNull() ?: 0L
-                                            onAlbumIdsChanged(firstId, newIdsStr)
+                                            
+                                            if (!isChecked && isLocked) {
+                                                onRequestUnlock(alb) { action() }
+                                            } else {
+                                                action()
+                                            }
                                         }
                                     )
                                 }
@@ -1082,21 +1131,33 @@ fun NodeCard(
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 modifier = Modifier.fillMaxWidth()
                                             ) {
-                                                Text("Event:")
-                                                Spacer(modifier = Modifier.width(16.dp))
-                                                RadioButton(
-                                                    selected = tempState == "Connecting",
-                                                    onClick = { tempState = "Connecting" }
-                                                )
+                                                Text("Event:", style = MaterialTheme.typography.bodyMedium)
                                                 Spacer(modifier = Modifier.width(8.dp))
-                                                Text("Connecting")
-                                                Spacer(modifier = Modifier.width(16.dp))
-                                                RadioButton(
-                                                    selected = tempState == "Disconnecting",
-                                                    onClick = { tempState = "Disconnecting" }
-                                                )
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    modifier = Modifier.clickable { tempState = "Connecting" }
+                                                ) {
+                                                    RadioButton(
+                                                        selected = tempState == "Connecting",
+                                                        onClick = { tempState = "Connecting" },
+                                                        modifier = Modifier.size(36.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text("Connecting", style = MaterialTheme.typography.bodyMedium)
+                                                }
                                                 Spacer(modifier = Modifier.width(8.dp))
-                                                Text("Disconnecting")
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    modifier = Modifier.clickable { tempState = "Disconnecting" }
+                                                ) {
+                                                    RadioButton(
+                                                        selected = tempState == "Disconnecting",
+                                                        onClick = { tempState = "Disconnecting" },
+                                                        modifier = Modifier.size(36.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text("Disconnecting", style = MaterialTheme.typography.bodyMedium)
+                                                }
                                             }
                                             
                                             Box(modifier = Modifier.fillMaxWidth()) {
@@ -1120,7 +1181,7 @@ fun NodeCard(
                                                     DropdownMenu(
                                                         expanded = showWifiDropdown,
                                                         onDismissRequest = { showWifiDropdown = false },
-                                                        modifier = Modifier.fillMaxWidth(0.9f)
+                                                        modifier = Modifier.fillMaxWidth(0.9f).heightIn(max = 240.dp)
                                                     ) {
                                                         wifiList.forEach { ssid ->
                                                             DropdownMenuItem(
@@ -1188,6 +1249,18 @@ fun NodeCard(
                         "RotateFavorites" -> {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text("Rotate Favorites", fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = if (node.dimmingPercent > 0 || node.blurPercent > 0 || node.greyscalePercent > 0) "FX (Set)" else "Configure FX",
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.clickable { showFxDialog = true }.padding(top = 2.dp)
+                                )
+                            }
+                        }
+                        "ShuffleFavorites" -> {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Shuffle Favorites", fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
                                     text = if (node.dimmingPercent > 0 || node.blurPercent > 0 || node.greyscalePercent > 0) "FX (Set)" else "Configure FX",
@@ -1346,7 +1419,7 @@ private suspend fun compileGraphToRules(database: AppDatabase, nodes: List<Node>
     database.automationRuleDao().deleteAll()
 
     // Find all Action nodes
-    val actionNodes = nodes.filter { it.type == "NextWallpaper" || it.type == "SwitchAlbum" || it.type == "RotateFavorites" || it.type == "RandomOrder" }
+    val actionNodes = nodes.filter { it.type == "NextWallpaper" || it.type == "SwitchAlbum" || it.type == "RotateFavorites" || it.type == "ShuffleFavorites" || it.type == "RandomOrder" }
     
     data class TempRule(val rule: AutomationRule, val actionY: Float)
     val tempRules = mutableListOf<TempRule>()

@@ -16,7 +16,10 @@ data class Album(
     val googlePhotosUrl: String? = null,
     val refreshIntervalValue: Int? = null,
     val refreshIntervalUnit: String? = null, // "Minutes", "Hours", "Days"
-    val lastRefreshedTime: Long? = null
+    val lastRefreshedTime: Long? = null,
+    val isHidden: Boolean = false,
+    val lockType: String? = null, // "PIN", "Gesture", "Device"
+    val lockValue: String? = null // PIN string (e.g. "1234") or gesture pattern representation string (e.g. "0,1,2")
 )
 
 @Entity(
@@ -89,7 +92,11 @@ data class AutomationRule(
     // WiFi triggers: WiFi state ("Connecting", "Disconnecting"), SSID name (optional)
     val wifiState: String? = null,
     val wifiSsid: String? = null,
-    val playFavoritesOnly: Boolean = false
+    val playFavoritesOnly: Boolean = false,
+
+    // Unlock / HomeScreen trigger conditions
+    val lockCondition: String? = null,       // e.g. "Always"
+    val homeScreenCondition: String? = null  // e.g. "Always"
 )
 
 @Entity(tableName = "nodes")

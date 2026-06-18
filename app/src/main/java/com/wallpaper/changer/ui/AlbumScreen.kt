@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -47,9 +48,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.blur
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -100,9 +98,11 @@ fun AlbumScreen(database: AppDatabase) {
     var activeAlbumId by remember { mutableStateOf<Long?>(null) }
     var activeWallpaperPath by remember { mutableStateOf<String?>(null) }
     var widgetHeight by remember { mutableStateOf(120f) }
-    var activeDimming by remember { mutableStateOf(0) }
-    var activeBlur by remember { mutableStateOf(0) }
-    var activeGreyscale by remember { mutableStateOf(0) }
+
+    // Vault session state
+    var unlockedAlbumIds by remember { mutableStateOf(emptySet<Long>()) }
+    var albumToUnlock by remember { mutableStateOf<Album?>(null) }
+    var pendingUnlockOpen by remember { mutableStateOf<Album?>(null) }
 
     fun refreshAlbums() {
         scope.launch {
@@ -127,44 +127,16 @@ fun AlbumScreen(database: AppDatabase) {
 
             val heightSet = database.appSettingDao().getSetting("wallpaper_widget_height")
             widgetHeight = heightSet?.value?.toFloatOrNull() ?: 120f
-
-            val dimming = if (database.appSettingDao().getSetting("global_dimming_enabled")?.value == "true") {
-                database.appSettingDao().getSetting("global_dimming_percent")?.value?.toIntOrNull() ?: 0
-            } else {
-                database.appSettingDao().getSetting("active_rule_dimming")?.value?.toIntOrNull() ?: 0
-            }
-            val blur = if (database.appSettingDao().getSetting("global_blur_enabled")?.value == "true") {
-                database.appSettingDao().getSetting("global_blur_percent")?.value?.toIntOrNull() ?: 0
-            } else {
-                database.appSettingDao().getSetting("active_rule_blur")?.value?.toIntOrNull() ?: 0
-            }
-            val greyscale = if (database.appSettingDao().getSetting("global_greyscale_enabled")?.value == "true") {
-                database.appSettingDao().getSetting("global_greyscale_percent")?.value?.toIntOrNull() ?: 0
-            } else {
-                database.appSettingDao().getSetting("active_rule_greyscale")?.value?.toIntOrNull() ?: 0
-            }
-            activeDimming = dimming
-            activeBlur = blur
-            activeGreyscale = greyscale
             
-            // Calculate missing photo count and fetch cover photo paths efficiently in background
+            // Calculate missing photo count in background
             list.forEach { album ->
                 scope.launch(Dispatchers.IO) {
-                    // 1. Fetch cover photo path instantly using limited query
-                    val coverPath = album.coverPhotoPath ?: run {
-                        val limitPhotos = database.photoDao().getPhotosForAlbumLimit(album.id, 10)
-                        limitPhotos.firstOrNull { it.isOnline || existsUri(context, it.path) }?.path
-                    }
-                    withContext(Dispatchers.Main) {
-                        coverPhotoPaths[album.id] = coverPath
-                    }
-                    
-                    // 2. Calculate missing photo count asynchronously
                     val photos = database.photoDao().getPhotosForAlbum(album.id)
                     val missing = photos.count { !it.isOnline && !existsUri(context, it.path) }
-                    withContext(Dispatchers.Main) {
-                        missingCounts[album.id] = missing
-                    }
+                    missingCounts[album.id] = missing
+                    
+                    val firstPhotoPath = photos.firstOrNull { it.isOnline || existsUri(context, it.path) }?.path
+                    coverPhotoPaths[album.id] = album.coverPhotoPath ?: firstPhotoPath
                 }
             }
         }
@@ -231,18 +203,6 @@ fun AlbumScreen(database: AppDatabase) {
                 // Current Wallpaper Widget (span = 2)
                 if (activeWallpaperPath != null) {
                     item(span = { GridItemSpan(maxLineSpan) }) {
-                        val blurModifier = if (activeBlur > 0) {
-                            Modifier.blur(((activeBlur / 100f) * 25f).dp)
-                        } else {
-                            Modifier
-                        }
-                        val saturationMatrix = remember(activeGreyscale) {
-                            val saturation = 1f - (activeGreyscale / 100f)
-                            ColorMatrix().apply {
-                                setToSaturation(saturation)
-                            }
-                        }
-
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -261,22 +221,13 @@ fun AlbumScreen(database: AppDatabase) {
                                         .fillMaxWidth()
                                         .weight(1f)
                                         .background(Color.Black, shape = RoundedCornerShape(8.dp))
-                                        .clip(RoundedCornerShape(8.dp))
                                 ) {
                                     AsyncImage(
                                         model = if (activeWallpaperPath!!.startsWith("content://") || activeWallpaperPath!!.startsWith("http://") || activeWallpaperPath!!.startsWith("https://")) Uri.parse(activeWallpaperPath) else File(activeWallpaperPath!!),
                                         contentDescription = "Current Wallpaper",
-                                        modifier = Modifier.fillMaxSize().then(blurModifier),
-                                        contentScale = ContentScale.Fit,
-                                        colorFilter = if (activeGreyscale > 0) ColorFilter.colorMatrix(saturationMatrix) else null
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Fit
                                     )
-                                    if (activeDimming > 0) {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .background(Color.Black.copy(alpha = activeDimming / 100f))
-                                        )
-                                    }
                                 }
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Row(
@@ -317,6 +268,7 @@ fun AlbumScreen(database: AppDatabase) {
                         AlbumItemCard(
                             album = album,
                             coverPath = coverPhotoPaths[album.id],
+                            isVaulted = album.isHidden && !unlockedAlbumIds.contains(album.id),
                             missingCount = missingCounts[album.id] ?: 0,
                             isActive = album.id in activeAlbumIds,
                             isCurrentlyActive = album.id == activeAlbumId,
@@ -362,7 +314,15 @@ fun AlbumScreen(database: AppDatabase) {
                                     refreshAlbums()
                                 }
                             },
-                            onSelect = { selectedAlbum = album },
+                            onSelect = {
+                                val isLocked = album.isHidden && !unlockedAlbumIds.contains(album.id)
+                                if (isLocked) {
+                                    albumToUnlock = album
+                                    pendingUnlockOpen = album
+                                } else {
+                                    selectedAlbum = album
+                                }
+                            },
                             onDelete = {
                                 scope.launch {
                                     database.albumDao().delete(album)
@@ -413,79 +373,196 @@ fun AlbumScreen(database: AppDatabase) {
         } else {
             // Photos inside selected album
             val album = selectedAlbum!!
-            Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+            var showRenameDialog by remember(album.id) { mutableStateOf(false) }
+            var showAlbumVaultSetup by remember(album.id) { mutableStateOf(false) }
+            var showAlbumRemoveVault by remember(album.id) { mutableStateOf(false) }
+            val isAlbumVaulted = album.isHidden && !unlockedAlbumIds.contains(album.id)
+
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Top bar: back arrow + album name (tappable) + actions
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 4.dp, end = 12.dp, top = 8.dp, bottom = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(album.name, style = MaterialTheme.typography.headlineSmall)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Random Order", style = MaterialTheme.typography.bodyMedium)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Switch(
-                            checked = album.randomOrder,
-                            onCheckedChange = { checked ->
-                                scope.launch {
-                                    val updated = album.copy(randomOrder = checked)
-                                    database.albumDao().update(updated)
-                                    selectedAlbum = updated
-                                    refreshAlbums()
-                                }
-                            }
-                        )
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Text("Scaling: ", style = MaterialTheme.typography.bodyMedium)
-                        var expanded by remember { mutableStateOf(false) }
-                        Box {
-                            Text(
-                                album.scalingMode,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.clickable { expanded = true }.padding(horizontal = 4.dp, vertical = 2.dp)
-                            )
-                            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                                listOf("Fill", "Stretch", "Fit").forEach { mode ->
-                                    DropdownMenuItem(
-                                        text = { Text(mode) },
-                                        onClick = {
-                                            scope.launch {
-                                                val updated = album.copy(scalingMode = mode)
-                                                database.albumDao().update(updated)
-                                                
-                                                // If the currently active photo belongs to this album and doesn't have an override,
-                                                // update active_wallpaper_scaling setting and trigger AutomationService to redraw
-                                                val activePathSetting = database.appSettingDao().getSetting("active_wallpaper_path")
-                                                val activePath = activePathSetting?.value
-                                                if (activePath != null) {
-                                                    val activePhoto = database.photoDao().getAllPhotos().find { it.path == activePath }
-                                                    if (activePhoto != null && activePhoto.albumId == album.id) {
-                                                        if (activePhoto.scalingOverride == "None") {
-                                                            database.appSettingDao().insertSetting(AppSetting("active_wallpaper_scaling", mode))
-                                                            
-                                                            // Trigger background service to broadcast updated scaling immediately
-                                                            val serviceIntent = Intent(context, com.wallpaper.changer.automation.AutomationService::class.java)
-                                                            context.startService(serviceIntent)
-                                                        }
-                                                    }
-                                                }
-                                                
-                                                selectedAlbum = updated
-                                                refreshAlbums()
-                                            }
-                                            expanded = false
-                                        }
-                                    )
-                                }
+                    // Back arrow
+                    IconButton(onClick = { selectedAlbum = null }) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back to Albums")
+                    }
+
+                    // Album name — tap to rename
+                    Text(
+                        text = album.name,
+                        style = MaterialTheme.typography.headlineSmall,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { showRenameDialog = true }
+                            .padding(horizontal = 4.dp),
+                        maxLines = 1
+                    )
+
+                    // Vault button
+                    IconButton(
+                        onClick = {
+                            if (album.isHidden) {
+                                if (!isAlbumVaulted) showAlbumRemoveVault = true
+                                // still locked: user already authenticated via card tap
+                            } else {
+                                showAlbumVaultSetup = true
                             }
                         }
-                        Spacer(modifier = Modifier.width(16.dp))
-                        TextButton(onClick = { selectedAlbum = null }) {
-                            Text("Back to Albums")
+                    ) {
+                        Icon(
+                            Icons.Default.Lock,
+                            contentDescription = if (album.isHidden) "Remove vault" else "Enable vault",
+                            tint = if (album.isHidden) MaterialTheme.colorScheme.primary
+                                   else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    // Random Order
+                    Text("Random", style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Switch(
+                        checked = album.randomOrder,
+                        onCheckedChange = { checked ->
+                            scope.launch {
+                                val updated = album.copy(randomOrder = checked)
+                                database.albumDao().update(updated)
+                                selectedAlbum = updated
+                                refreshAlbums()
+                            }
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    // Scaling dropdown
+                    Text("Scale:", style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.width(4.dp))
+                    var expanded by remember { mutableStateOf(false) }
+                    Box {
+                        Text(
+                            album.scalingMode,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.clickable { expanded = true }.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                            listOf("Fill", "Stretch", "Fit").forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode) },
+                                    onClick = {
+                                        scope.launch {
+                                            val updated = album.copy(scalingMode = mode)
+                                            database.albumDao().update(updated)
+
+                                            val activePathSetting = database.appSettingDao().getSetting("active_wallpaper_path")
+                                            val activePath = activePathSetting?.value
+                                            if (activePath != null) {
+                                                val activePhoto = database.photoDao().getAllPhotos().find { it.path == activePath }
+                                                if (activePhoto != null && activePhoto.albumId == album.id) {
+                                                    if (activePhoto.scalingOverride == "None") {
+                                                        database.appSettingDao().insertSetting(AppSetting("active_wallpaper_scaling", mode))
+                                                        val serviceIntent = Intent(context, com.wallpaper.changer.automation.AutomationService::class.java)
+                                                        context.startService(serviceIntent)
+                                                    }
+                                                }
+                                            }
+
+                                            selectedAlbum = updated
+                                            refreshAlbums()
+                                        }
+                                        expanded = false
+                                    }
+                                )
+                            }
                         }
                     }
                 }
-                
+
+                // Rename dialog
+                if (showRenameDialog) {
+                    var newName by remember { mutableStateOf(album.name) }
+                    AlertDialog(
+                        onDismissRequest = { showRenameDialog = false },
+                        title = { Text("Rename Album") },
+                        text = {
+                            OutlinedTextField(
+                                value = newName,
+                                onValueChange = { newName = it },
+                                label = { Text("Album Name") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    if (newName.isNotBlank()) {
+                                        scope.launch {
+                                            val updated = album.copy(name = newName.trim())
+                                            database.albumDao().update(updated)
+                                            selectedAlbum = updated
+                                            refreshAlbums()
+                                            showRenameDialog = false
+                                        }
+                                    }
+                                }
+                            ) { Text("Rename") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showRenameDialog = false }) { Text("Cancel") }
+                        }
+                    )
+                }
+
+                // Vault setup dialog (inside album)
+                if (showAlbumVaultSetup) {
+                    SafeFolderSetupDialog(
+                        onDismiss = { showAlbumVaultSetup = false },
+                        onSetupComplete = { lockType, lockValue ->
+                            scope.launch {
+                                val updated = album.copy(isHidden = true, lockType = lockType, lockValue = lockValue)
+                                database.albumDao().update(updated)
+                                selectedAlbum = updated
+                                refreshAlbums()
+                            }
+                            showAlbumVaultSetup = false
+                        }
+                    )
+                }
+
+                // Remove vault dialog (inside album)
+                if (showAlbumRemoveVault) {
+                    AlertDialog(
+                        onDismissRequest = { showAlbumRemoveVault = false },
+                        title = { Text("Remove Vault") },
+                        text = { Text("Remove vault protection from '${album.name}'?") },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        val updated = album.copy(isHidden = false, lockType = null, lockValue = null)
+                                        database.albumDao().update(updated)
+                                        selectedAlbum = updated
+                                        refreshAlbums()
+                                    }
+                                    showAlbumRemoveVault = false
+                                }
+                            ) { Text("Remove") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showAlbumRemoveVault = false }) { Text("Cancel") }
+                        }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+
                 Spacer(modifier = Modifier.height(8.dp))
                 
                 PhotoManagementHeader(
@@ -651,6 +728,7 @@ fun AlbumScreen(database: AppDatabase) {
                         }
                     }
                 }
+            }
             }
         }
 
@@ -930,6 +1008,26 @@ fun AlbumScreen(database: AppDatabase) {
                 }
             }
         }
+
+        // Vault unlock dialog
+        albumToUnlock?.let { album ->
+            SafeFolderUnlockDialog(
+                albumName = album.name,
+                lockType = album.lockType ?: "PIN",
+                lockValue = album.lockValue,
+                onUnlocked = {
+                    unlockedAlbumIds = unlockedAlbumIds + album.id
+                    val toOpen = pendingUnlockOpen
+                    pendingUnlockOpen = null
+                    albumToUnlock = null
+                    if (toOpen != null) selectedAlbum = toOpen
+                },
+                onCancel = {
+                    pendingUnlockOpen = null
+                    albumToUnlock = null
+                }
+            )
+        }
     }
 }
 
@@ -938,6 +1036,7 @@ fun AlbumScreen(database: AppDatabase) {
 fun AlbumItemCard(
     album: Album,
     coverPath: String?,
+    isVaulted: Boolean = false,
     missingCount: Int,
     isActive: Boolean,
     isCurrentlyActive: Boolean,
@@ -947,6 +1046,8 @@ fun AlbumItemCard(
     onUpdate: (Album) -> Unit
 ) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showVaultSetup by remember { mutableStateOf(false) }
+    var showRemoveVaultConfirm by remember { mutableStateOf(false) }
     
     val borderModifier = if (isActive) {
         Modifier.border(3.dp, MaterialTheme.colorScheme.primary, shape = RoundedCornerShape(12.dp))
@@ -964,7 +1065,22 @@ fun AlbumItemCard(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            if (coverPath != null) {
+            if (isVaulted) {
+                // Vault overlay — hide contents, show lock icon
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.85f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.Lock,
+                        contentDescription = "Locked vault",
+                        tint = Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier.size(48.dp)
+                    )
+                }
+            } else if (coverPath != null) {
                 AsyncImage(
                     model = if (coverPath.startsWith("content://")) Uri.parse(coverPath) else File(coverPath),
                     contentDescription = "Album cover",
@@ -1019,6 +1135,37 @@ fun AlbumItemCard(
                         modifier = Modifier.size(16.dp)
                     )
                 }
+
+                Spacer(modifier = Modifier.width(4.dp))
+
+                // Vault toggle button
+                IconButton(
+                    onClick = {
+                        if (album.isHidden) {
+                            if (!isVaulted) {
+                                // Already unlocked this session — offer to remove vault
+                                showRemoveVaultConfirm = true
+                            }
+                            // If still locked, do nothing — user must unlock via card tap first
+                        } else {
+                            showVaultSetup = true
+                        }
+                    },
+                    modifier = Modifier
+                        .size(32.dp)
+                        .background(
+                            if (album.isHidden) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
+                            else Color.Black.copy(alpha = 0.5f),
+                            shape = CircleShape
+                        )
+                ) {
+                    Icon(
+                        Icons.Default.Lock,
+                        contentDescription = if (album.isHidden) "Remove vault" else "Enable vault",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
 
             Column(
@@ -1033,7 +1180,7 @@ fun AlbumItemCard(
                     .padding(8.dp)
             ) {
                 Text(
-                    text = album.name,
+                    text = if (isVaulted) "vaulted-${album.name.take(4).lowercase()}..." else album.name,
                     color = Color.White,
                     style = MaterialTheme.typography.titleMedium,
                     maxLines = 1
@@ -1081,6 +1228,39 @@ fun AlbumItemCard(
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showVaultSetup) {
+        SafeFolderSetupDialog(
+            onDismiss = { showVaultSetup = false },
+            onSetupComplete = { lockType, lockValue ->
+                onUpdate(album.copy(isHidden = true, lockType = lockType, lockValue = lockValue))
+                showVaultSetup = false
+            }
+        )
+    }
+
+    if (showRemoveVaultConfirm) {
+        AlertDialog(
+            onDismissRequest = { showRemoveVaultConfirm = false },
+            title = { Text("Remove Vault") },
+            text = { Text("Remove vault protection from '${album.name}'? It will become visible without authentication.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onUpdate(album.copy(isHidden = false, lockType = null, lockValue = null))
+                        showRemoveVaultConfirm = false
+                    }
+                ) {
+                    Text("Remove")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRemoveVaultConfirm = false }) {
                     Text("Cancel")
                 }
             }

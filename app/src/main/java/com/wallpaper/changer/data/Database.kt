@@ -142,7 +142,7 @@ interface AppSettingDao {
 
 @Database(
     entities = [Album::class, Photo::class, AutomationRule::class, NodeEntity::class, ConnectionEntity::class, AppSetting::class],
-    version = 11,
+    version = 13,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

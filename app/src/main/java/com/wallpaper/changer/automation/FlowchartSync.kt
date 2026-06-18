@@ -21,6 +21,7 @@ object FlowchartSync {
                 "NextWallpaper", "PrevWallpaper" -> "Change Wallpaper"
                 "SwitchAlbum" -> "Switch Album"
                 "RotateFavorites" -> "Rotate Favorites"
+                "ShuffleFavorites" -> "Shuffle Favorites"
                 "RandomOrder" -> "Random Order"
                 else -> "Change Wallpaper"
             }

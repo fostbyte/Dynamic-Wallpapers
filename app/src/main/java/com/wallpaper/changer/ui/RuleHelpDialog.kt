@@ -58,8 +58,9 @@ fun RuleHelpDialog(onDismiss: () -> Unit) {
                 item {
                     Text("• SwitchAlbum:\n  - Changes the active album to the specified album.\n  - YAML fields: action: \"SwitchAlbum\", album: \"[Album Name]\"", style = MaterialTheme.typography.bodyMedium)
                 }
+
                 item {
-                    Text("• RotateFavorites:\n  - Rotates to a favorited photo across all albums.\n  - YAML fields: action: \"RotateFavorites\"", style = MaterialTheme.typography.bodyMedium)
+                    Text("• ShuffleFavorites:\n  - Rotates to a random favorited photo across all albums.\n  - YAML fields: action: \"ShuffleFavorites\"", style = MaterialTheme.typography.bodyMedium)
                 }
             }
         },

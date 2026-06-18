@@ -86,8 +86,8 @@ object YamlParser {
             }
             
             val actionType = map["action"] as? String ?: throw Exception("Rule '$name' is missing field 'action'")
-            if (actionType != "NextWallpaper" && actionType != "PrevWallpaper" && actionType != "RandomOrder" && actionType != "SwitchAlbum" && actionType != "RotateFavorites") {
-                throw Exception("Rule '$name' has invalid action '$actionType'. Must be 'NextWallpaper', 'PrevWallpaper', 'RandomOrder', 'SwitchAlbum' or 'RotateFavorites'")
+            if (actionType != "NextWallpaper" && actionType != "PrevWallpaper" && actionType != "RandomOrder" && actionType != "SwitchAlbum" && actionType != "RotateFavorites" && actionType != "ShuffleFavorites") {
+                throw Exception("Rule '$name' has invalid action '$actionType'. Must be 'NextWallpaper', 'PrevWallpaper', 'RandomOrder', 'SwitchAlbum', 'RotateFavorites' or 'ShuffleFavorites'")
             }
             
             val targetAlbumName = map["album"] as? String

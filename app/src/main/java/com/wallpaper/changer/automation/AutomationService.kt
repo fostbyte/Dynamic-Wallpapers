@@ -951,9 +951,11 @@ class AutomationService : Service() {
                 Toast.makeText(applicationContext, "changing album to $albumNames", Toast.LENGTH_SHORT).show()
             }
             
-            rotateWallpaper(finalIds, random = rule.randomOrder)
+            rotateWallpaper(finalIds, random = false)
         } else if (rule.actionType == "RotateFavorites") {
             rotateFavorites(random = rule.randomOrder)
+        } else if (rule.actionType == "ShuffleFavorites") {
+            rotateFavorites(random = true)
         }
     }
 

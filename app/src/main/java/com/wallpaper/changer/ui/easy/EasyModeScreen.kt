@@ -33,6 +33,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.wallpaper.changer.data.Album
 import com.wallpaper.changer.data.AppDatabase
 import com.wallpaper.changer.data.AutomationRule
+import com.wallpaper.changer.data.formatTimeBySystem
+import com.wallpaper.changer.ui.SafeFolderUnlockDialog
 import kotlinx.coroutines.launch
 import java.util.Calendar
 import java.util.Locale
@@ -54,11 +56,31 @@ fun EasyModeScreen(database: AppDatabase) {
     
     var isEditingRule by remember { mutableStateOf(false) }
     var editingRule by remember { mutableStateOf<AutomationRule?>(null) }
+    var unlockedAlbumIds by remember { mutableStateOf(emptySet<Long>()) }
+    var albumToUnlock by remember { mutableStateOf<Album?>(null) }
+    var pendingSaveRule by remember { mutableStateOf<AutomationRule?>(null) }
+  
     
+
     fun refresh() {
         scope.launch {
             rules = database.automationRuleDao().getAllRules()
             albums = database.albumDao().getAll()
+        }
+    }
+
+    fun saveRuleDirectly(ruleToSave: AutomationRule) {
+        scope.launch {
+            if (ruleToSave.id == 0L) {
+                // New rule, priority is max + 1
+                val nextPriority = (rules.maxOfOrNull { it.priority } ?: 0) + 1
+                database.automationRuleDao().insert(ruleToSave.copy(priority = nextPriority))
+            } else {
+                database.automationRuleDao().update(ruleToSave)
+            }
+            refresh()
+            isEditingRule = false
+            editingRule = null
         }
     }
 
@@ -76,16 +98,16 @@ fun EasyModeScreen(database: AppDatabase) {
             },
             onSave = { ruleToSave ->
                 scope.launch {
-                    if (ruleToSave.id == 0L) {
-                        // New rule, priority is max + 1
-                        val nextPriority = (rules.maxOfOrNull { it.priority } ?: 0) + 1
-                        database.automationRuleDao().insert(ruleToSave.copy(priority = nextPriority))
+                    val targetIds = ruleToSave.targetAlbumIds?.split(",")?.mapNotNull { it.trim().toLongOrNull() } ?: emptyList()
+                    val hiddenAlbums = albums.filter { it.isHidden && targetIds.contains(it.id) }
+                    val lockedAlbums = hiddenAlbums.filter { !unlockedAlbumIds.contains(it.id) }
+
+                    if (ruleToSave.actionType == "SwitchAlbum" && lockedAlbums.isNotEmpty()) {
+                        pendingSaveRule = ruleToSave
+                        albumToUnlock = lockedAlbums.first()
                     } else {
-                        database.automationRuleDao().update(ruleToSave)
+                        saveRuleDirectly(ruleToSave)
                     }
-                    refresh()
-                    isEditingRule = false
-                    editingRule = null
                 }
             },
             onDelete = { ruleToDelete ->
@@ -166,6 +188,34 @@ fun EasyModeScreen(database: AppDatabase) {
                 }
             }
         }
+
+        albumToUnlock?.let { album ->
+            SafeFolderUnlockDialog(
+                albumName = album.name,
+                lockType = album.lockType ?: "PIN",
+                lockValue = album.lockValue,
+                onUnlocked = {
+                    val newUnlocked = unlockedAlbumIds + album.id
+                    unlockedAlbumIds = newUnlocked
+                    albumToUnlock = null
+                    
+                    pendingSaveRule?.let { ruleToSave ->
+                        val targetIds = ruleToSave.targetAlbumIds?.split(",")?.mapNotNull { it.trim().toLongOrNull() } ?: emptyList()
+                        val remainingLocked = albums.filter { it.isHidden && targetIds.contains(it.id) && !newUnlocked.contains(it.id) }
+                        if (remainingLocked.isNotEmpty()) {
+                            albumToUnlock = remainingLocked.first()
+                        } else {
+                            saveRuleDirectly(ruleToSave)
+                            pendingSaveRule = null
+                        }
+                    }
+                },
+                onCancel = {
+                    albumToUnlock = null
+                    pendingSaveRule = null
+                }
+            )
+        }
     }
 }
 
@@ -179,6 +229,7 @@ fun RuleListRow(
     onMoveDown: () -> Unit,
     onClick: () -> Unit
 ) {
+    val context = LocalContext.current
     Card(
         modifier = Modifier.fillMaxWidth().clickable { onClick() },
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -205,26 +256,46 @@ fun RuleListRow(
                 Text(rule.name, style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(4.dp))
                 
-                val triggerDesc = when (rule.type) {
-                    "Time" -> "Time: ${rule.time} (${rule.daysOfWeek ?: "All Days"})"
+                val triggerDesc = when (rule.type) {    
+                    "Time" -> {
+                        val timeText = rule.time?.let { formatTimeBySystem(it, context) } ?: ""
+                        "Time: $timeText (${rule.daysOfWeek ?: "All Days"})"
+                    }
                     "WiFi" -> {
                         val ssidText = if (!rule.wifiSsid.isNullOrBlank()) " (${rule.wifiSsid})" else ""
                         "WiFi: ${rule.wifiState}$ssidText"
                     }
                     "Interval" -> "Interval: Every ${rule.intervalValue} ${rule.intervalUnit}"
                     "Gesture" -> "Gesture: ${rule.gestureType}"
-                    "Unlock" -> "Device Unlocked"
-                    "HomeScreen" -> "Go to Home Screen"
-                    else -> "Geofence: Lat=${rule.latitude?.toString()?.take(7)}, Lng=${rule.longitude?.toString()?.take(7)} (radius=${rule.radius}m, ${rule.locationCondition ?: "Entering"})"
+                    "Unlock" -> "Device Unlocked ${rule.lockCondition}"
+                    "HomeScreen" -> "Go to Home Screen ${rule.homeScreenCondition}"
+                    "Compound" -> {
+                        val triggers = mutableListOf<String>()
+                        rule.time?.let { triggers.add("Time: ${formatTimeBySystem(it, context)}") }
+                        rule.latitude?.let { triggers.add("Geofence: ${rule.locationCondition ?: "Entering"}") }
+                        rule.wifiState?.let { triggers.add("WiFi: $it") }
+                        rule.lockCondition?.let { triggers.add("Device Unlocked $it") }
+                        rule.homeScreenCondition?.let { triggers.add("Go to Home Screen $it") }
+                        "Compound (${rule.connectionLogic}): ${triggers.joinToString(", ")}"
+                    }
+                    else -> {
+                        val lat = rule.latitude?.toString()?.take(7)
+                        val lng = rule.longitude?.toString()?.take(7)
+                        "Geofence: Lat=$lat, Lng=$lng (radius=50m, ${rule.locationCondition ?: "Entering"})"
+                    }
                 }
                 
-                val actionDesc = if (rule.actionType == "NextWallpaper") {
-                    "Action: Next Wallpaper"
-                } else {
-                    val albumName = albums.find { it.id == rule.targetAlbumId }?.name ?: "Unknown Album"
-                    "Action: Switch to '$albumName'"
+                val actionDesc = when (rule.actionType) {
+                    "NextWallpaper" -> "Action: Next Wallpaper"
+                    "RotateFavorites" -> "Action: Rotate Favorites"
+                    "ShuffleFavorites" -> "Action: Shuffle Favorites"
+                    else -> {
+                        val albumName = albums.find { it.id == rule.targetAlbumId }?.name ?: "Unknown Album"
+                        "Action: Switch to '$albumName'"
+                    }
                 }
-                
+            
+            
                 Text(triggerDesc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(actionDesc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -247,10 +318,12 @@ fun AddRulePanel(
     var ruleName by remember { mutableStateOf(rule?.name ?: "") }
     
     // Multiple Trigger switches
-    var isTimeEnabled by remember { mutableStateOf(rule?.time != null || rule?.type == "Time" || (rule == null && rule?.type != "Interval" && rule?.type != "WiFi")) }
+    var isTimeEnabled by remember { mutableStateOf(rule?.time != null || rule?.type == "Time" ) }
     var isLocationEnabled by remember { mutableStateOf(rule?.latitude != null || rule?.type == "Location") }
     var isIntervalEnabled by remember { mutableStateOf(rule?.type == "Interval") }
     var isWifiEnabled by remember { mutableStateOf(rule?.type == "WiFi") }
+    var isUnlockEnabled by remember { mutableStateOf(rule?.type == "Unlock") }
+    var isHomeScreenEnabled by remember { mutableStateOf(rule?.type == "HomeScreen") }
     
     var connectionLogic by remember { mutableStateOf(rule?.connectionLogic ?: "AND") }
     var showLogicDropdown by remember { mutableStateOf(false) }
@@ -266,12 +339,17 @@ fun AddRulePanel(
     // Location states
     var latText by remember { mutableStateOf(rule?.latitude?.toString() ?: "37.7749") }
     var lngText by remember { mutableStateOf(rule?.longitude?.toString() ?: "-122.4194") }
-    var radiusText by remember { mutableStateOf(rule?.radius?.toString() ?: "100.0") }
+    var radiusText by remember { mutableStateOf(rule?.radius?.toString() ?: "50") }
     var locationCondition by remember { mutableStateOf(rule?.locationCondition ?: "Entering") }
 
     // WiFi states
     var wifiState by remember { mutableStateOf(rule?.wifiState ?: "Connecting") }
     var wifiSsid by remember { mutableStateOf(rule?.wifiSsid ?: "") }
+
+    // unlock states
+    var lockCondition by remember { mutableStateOf(rule?.lockCondition ?: "Always") }
+    // home screen states
+    var homeScreenCondition by remember { mutableStateOf(rule?.homeScreenCondition ?: "Always") }
 
     // Interval states
     var intervalValText by remember { mutableStateOf(rule?.intervalValue?.toString() ?: "10") }
@@ -345,9 +423,6 @@ fun AddRulePanel(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.fillMaxWidth().clickable { 
                                 isTimeEnabled = !isTimeEnabled 
-                                if (isTimeEnabled) {
-                                    isIntervalEnabled = false
-                                }
                             }.padding(vertical = 4.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -356,9 +431,6 @@ fun AddRulePanel(
                                 checked = isTimeEnabled, 
                                 onCheckedChange = { checked -> 
                                     isTimeEnabled = checked
-                                    if (checked) {
-                                        isIntervalEnabled = false
-                                    }
                                 }
                             )
                         }
@@ -367,7 +439,7 @@ fun AddRulePanel(
                             Column(modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp)) {
                                 // Time picker clickable text
                                 Text(
-                                    text = timeStr,
+                                    text = formatTimeBySystem(timeStr, context),
                                     fontSize = 32.sp,
                                     color = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.clickable {
@@ -383,7 +455,7 @@ fun AddRulePanel(
                                             },
                                             initialHour,
                                             initialMinute,
-                                            true
+                                            android.text.format.DateFormat.is24HourFormat(context)
                                         ).show()
                                     }
                                 )
@@ -431,9 +503,6 @@ fun AddRulePanel(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.fillMaxWidth().clickable { 
                                 isLocationEnabled = !isLocationEnabled 
-                                if (isLocationEnabled) {
-                                    isIntervalEnabled = false
-                                }
                             }.padding(vertical = 4.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -442,9 +511,6 @@ fun AddRulePanel(
                                 checked = isLocationEnabled, 
                                 onCheckedChange = { checked -> 
                                     isLocationEnabled = checked
-                                    if (checked) {
-                                        isIntervalEnabled = false
-                                    }
                                 }
                             )
                         }
@@ -461,7 +527,7 @@ fun AddRulePanel(
                                 ) {
                                     val latVal = latText.toDoubleOrNull() ?: 37.7749
                                     val lngVal = lngText.toDoubleOrNull() ?: -122.4194
-                                    val radVal = radiusText.toFloatOrNull() ?: 100f
+                                    val radVal = 50f
                                     
                                     MapPickerWebView(
                                         initialLat = latVal,
@@ -474,12 +540,6 @@ fun AddRulePanel(
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 }
-                                OutlinedTextField(
-                                    value = radiusText,
-                                    onValueChange = { radiusText = it },
-                                    label = { Text("Geofence Radius (meters)") },
-                                    modifier = Modifier.fillMaxWidth()
-                                )
                                 
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
@@ -598,9 +658,6 @@ fun AddRulePanel(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.fillMaxWidth().clickable { 
                                 isWifiEnabled = !isWifiEnabled 
-                                if (isWifiEnabled) {
-                                    isIntervalEnabled = false
-                                }
                             }.padding(vertical = 4.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -609,9 +666,44 @@ fun AddRulePanel(
                                 checked = isWifiEnabled, 
                                 onCheckedChange = { checked -> 
                                     isWifiEnabled = checked
-                                    if (checked) {
-                                        isIntervalEnabled = false
-                                    }
+                                }
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Unlock Trigger Switch
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable { 
+                                isUnlockEnabled = !isUnlockEnabled 
+                            }.padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Screen Unlock Trigger", style = MaterialTheme.typography.bodyLarge)
+                            Switch(
+                                checked = isUnlockEnabled, 
+                                onCheckedChange = { checked -> 
+                                    isUnlockEnabled = checked
+                                }
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Homescreen Setup Switch
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable { 
+                                isHomeScreenEnabled = !isHomeScreenEnabled 
+                            }.padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Homescreen Navigation Trigger", style = MaterialTheme.typography.bodyLarge)
+                            Switch(
+                                checked = isHomeScreenEnabled, 
+                                onCheckedChange = { checked -> 
+                                    isHomeScreenEnabled = checked
                                 }
                             )
                         }
@@ -625,21 +717,33 @@ fun AddRulePanel(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Text("Event:")
-                                    Spacer(modifier = Modifier.width(16.dp))
-                                    RadioButton(
-                                        selected = wifiState == "Connecting",
-                                        onClick = { wifiState = "Connecting" }
-                                    )
+                                    Text("Event:", style = MaterialTheme.typography.bodyMedium)
                                     Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Connecting")
-                                    Spacer(modifier = Modifier.width(16.dp))
-                                    RadioButton(
-                                        selected = wifiState == "Disconnecting",
-                                        onClick = { wifiState = "Disconnecting" }
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.clickable { wifiState = "Connecting" }
+                                    ) {
+                                        RadioButton(
+                                            selected = wifiState == "Connecting",
+                                            onClick = { wifiState = "Connecting" },
+                                            modifier = Modifier.size(36.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Connecting", style = MaterialTheme.typography.bodyMedium)
+                                    }
                                     Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Disconnecting")
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.clickable { wifiState = "Disconnecting" }
+                                    ) {
+                                        RadioButton(
+                                            selected = wifiState == "Disconnecting",
+                                            onClick = { wifiState = "Disconnecting" },
+                                            modifier = Modifier.size(36.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Disconnecting", style = MaterialTheme.typography.bodyMedium)
+                                    }
                                 }
 
                                 val wifiList = rememberWifiSsids(context)
@@ -666,7 +770,7 @@ fun AddRulePanel(
                                         DropdownMenu(
                                             expanded = showWifiDropdown,
                                             onDismissRequest = { showWifiDropdown = false },
-                                            modifier = Modifier.fillMaxWidth(0.9f)
+                                            modifier = Modifier.fillMaxWidth(0.9f).heightIn(max = 240.dp)
                                         ) {
                                             wifiList.forEach { ssid ->
                                                 DropdownMenuItem(
@@ -683,7 +787,56 @@ fun AddRulePanel(
                             }
                         }
 
-                        val enabledEventCount = (if (isTimeEnabled) 1 else 0) + (if (isLocationEnabled) 1 else 0) + (if (isWifiEnabled) 1 else 0)
+                    //     Spacer(modifier = Modifier.height(8.dp))
+                    //     if (isUnlockEnabled) {
+                    //         Column(
+                    //             modifier = Modifier.padding(start = 16.dp, top = 8.dp),
+                    //             verticalArrangement = Arrangement.spacedBy(8.dp)
+                    //         ) {
+                    //             // On Unlock Trigger Switch
+                    //             Row(
+                    //                 verticalAlignment = Alignment.CenterVertically,
+                    //                 modifier = Modifier.fillMaxWidth().clickable {
+                    //                     isUnlockEnabled = !isUnlockEnabled
+                    //                 }.padding(vertical = 4.dp),
+                    //                 horizontalArrangement = Arrangement.SpaceBetween
+                    //             ) {
+                    //                 Text("On Device Unlock", style = MaterialTheme.typography.bodyLarge)
+                    //                 Switch(
+                    //                     checked = isUnlockEnabled,
+                    //                     onCheckedChange = { checked ->
+                    //                         isUnlockEnabled = checked
+                    //                     }
+                    //                 )
+                    //             }
+                    //         }
+                    //     }
+                    //     Spacer(modifier = Modifier.height(8.dp))
+                    //     if (isHomeScreenEnabled) {
+                    //         Column(
+                    //             modifier = Modifier.padding(start = 16.dp, top = 8.dp),
+                    //             verticalArrangement = Arrangement.spacedBy(8.dp)
+                    //         ) {
+                    //         // On Home Screen Trigger Switch
+                    //         Row(
+                    //             verticalAlignment = Alignment.CenterVertically,
+                    //             modifier = Modifier.fillMaxWidth().clickable {
+                    //                 isHomeScreenEnabled = !isHomeScreenEnabled
+                    //             }.padding(vertical = 4.dp),
+                    //             horizontalArrangement = Arrangement.SpaceBetween
+                    //         ) {
+                    //             Text("On Return to Home Screen", style = MaterialTheme.typography.bodyLarge)
+                    //             Switch(
+                    //                 checked = isHomeScreenEnabled,
+                    //                 onCheckedChange = { checked ->
+                    //                     isHomeScreenEnabled = checked
+                    //                 }
+                    //             )
+                    //         }
+                    //     }
+                    // }
+
+                        val enabledEventCount = (if (isTimeEnabled) 1 else 0) + (if (isLocationEnabled) 1 else 0) + (if (isWifiEnabled) 1 else 0) + (if (isUnlockEnabled) 1 else 0) + (if (isHomeScreenEnabled) 1 else 0)
                         if (enabledEventCount >= 2) {
                             Spacer(modifier = Modifier.height(16.dp))
                             HorizontalDivider()
@@ -739,6 +892,17 @@ fun AddRulePanel(
                                 onClick = { actionType = "NextWallpaper" }
                             )
                             Text("Next wallpaper", style = MaterialTheme.typography.bodyLarge)
+                        }
+
+
+
+                        // Shuffle Favorites Radio
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(
+                                selected = actionType == "ShuffleFavorites",
+                                onClick = { actionType = "ShuffleFavorites" }
+                            )
+                            Text("Shuffle Favorites", style = MaterialTheme.typography.bodyLarge)
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
@@ -824,12 +988,24 @@ fun AddRulePanel(
                         
                         val enabledEventCount = (if (isTimeEnabled) 1 else 0) + (if (isLocationEnabled) 1 else 0) + (if (isWifiEnabled) 1 else 0)
                         val locVerb = if (locationCondition == "Leaving") "leaves" else "enters"
+                        val actionWord = when (actionType) {
+                            "NextWallpaper" -> "execute Next Wallpaper"
+                            "RotateFavorites" -> "Rotate Favorites"
+                            "ShuffleFavorites" -> "Shuffle Favorites"
+                            else -> {
+                                val albumName = albums.filter { selectedAlbumIds.contains(it.id) }.joinToString(", ") { it.name }.ifBlank { "Selected Album" }
+                                "set active playlist to '$albumName'"
+                            }
+                        }
                         val statement = when {
+                            isUnlockEnabled && isHomeScreenEnabled -> "On Device Unlock OR Home Screen, $actionWord."
+                            isUnlockEnabled -> "On Device Unlock, $actionWord."
+                            isHomeScreenEnabled -> "On Return to Home Screen, $actionWord."
                             enabledEventCount >= 2 -> {
                                 val relationWord = " $connectionLogic "
                                 val conditions = mutableListOf<String>()
                                 if (isTimeEnabled) {
-                                    conditions.add("clock hits $timeStr on [${selectedDays.joinToString(", ")}]")
+                                    conditions.add("clock hits ${formatTimeBySystem(timeStr, context)} on [${selectedDays.joinToString(", ")}]")
                                 }
                                 if (isLocationEnabled) {
                                     conditions.add("device $locVerb geofence (Lat=${latText.take(5)}, Lng=${lngText.take(5)})")
@@ -838,46 +1014,31 @@ fun AddRulePanel(
                                     val ssidText = if (wifiSsid.isNotBlank()) " to '$wifiSsid'" else ""
                                     conditions.add("device is $wifiState WiFi$ssidText")
                                 }
-                                val actionWord = if (actionType == "NextWallpaper") {
-                                    "execute Next Wallpaper"
-                                } else {
-                                    val albumName = albums.filter { selectedAlbumIds.contains(it.id) }.joinToString(", ") { it.name }.ifBlank { "Selected Album" }
-                                    "set active playlist to '$albumName'"
-                                }
                                 "IF ${conditions.joinToString(relationWord)} THEN $actionWord."
                             }
-                            isTimeEnabled && actionType == "NextWallpaper" -> {
-                                "IF clock hits $timeStr on [${selectedDays.joinToString(", ")}] THEN execute Next Wallpaper."
+                            isTimeEnabled -> {
+                                "IF clock hits ${formatTimeBySystem(timeStr, context)} on [${selectedDays.joinToString(", ")}] THEN $actionWord."
                             }
-                            isTimeEnabled && actionType == "SwitchAlbum" -> {
-                                val albumName = albums.filter { selectedAlbumIds.contains(it.id) }.joinToString(", ") { it.name }.ifBlank { "Selected Album" }
-                                "IF clock hits $timeStr on [${selectedDays.joinToString(", ")}] THEN set active playlist to '$albumName'."
+                            isLocationEnabled -> {
+                                "IF device $locVerb geofence (Lat=${latText.take(5)}, Lng=${lngText.take(5)}) THEN $actionWord."
                             }
-                            isLocationEnabled && actionType == "NextWallpaper" -> {
-                                "IF device $locVerb geofence (Lat=${latText.take(5)}, Lng=${lngText.take(5)}) THEN execute Next Wallpaper."
+                            isIntervalEnabled -> {
+                                if (actionType == "SwitchAlbum") {
+                                    val albumName = albums.filter { selectedAlbumIds.contains(it.id) }.joinToString(", ") { it.name }.ifBlank { "Selected Album" }
+                                    "Rotate wallpapers inside active album every $intervalValText $intervalUnit and switch to playlist '$albumName'."
+                                } else if (actionType == "RotateFavorites") {
+                                    "Rotate favorite wallpapers every $intervalValText $intervalUnit."
+                                } else if (actionType == "ShuffleFavorites") {
+                                    "Shuffle favorite wallpapers every $intervalValText $intervalUnit."
+                                } else {
+                                    val orderText = if (randomOrder) "in Random order" else "in Sequential order"
+                                    "Rotate wallpapers inside active album every $intervalValText $intervalUnit $orderText."
+                                }
                             }
-                            isLocationEnabled && actionType == "SwitchAlbum" -> {
-                                val albumName = albums.filter { selectedAlbumIds.contains(it.id) }.joinToString(", ") { it.name }.ifBlank { "Selected Album" }
-                                "IF device $locVerb geofence (Lat=${latText.take(5)}, Lng=${lngText.take(5)}) THEN set active playlist to '$albumName'."
-                            }
-                            isIntervalEnabled && actionType == "NextWallpaper" -> {
-                                val orderText = if (randomOrder) "in Random order" else "in Sequential order"
-                                "Rotate wallpapers inside active album every $intervalValText $intervalUnit $orderText."
-                            }
-                            isIntervalEnabled && actionType == "SwitchAlbum" -> {
-                                val albumName = albums.filter { selectedAlbumIds.contains(it.id) }.joinToString(", ") { it.name }.ifBlank { "Selected Album" }
-                                "Rotate wallpapers inside active album every $intervalValText $intervalUnit and switch to playlist '$albumName'."
-                            }
-                            isWifiEnabled && actionType == "NextWallpaper" -> {
+                            isWifiEnabled -> {
                                 val ssidText = if (wifiSsid.isNotBlank()) " to '$wifiSsid'" else ""
-                                "IF device is $wifiState WiFi$ssidText THEN execute Next Wallpaper."
+                                "IF device is $wifiState WiFi$ssidText THEN $actionWord."
                             }
-                            isWifiEnabled && actionType == "SwitchAlbum" -> {
-                                val albumName = albums.filter { selectedAlbumIds.contains(it.id) }.joinToString(", ") { it.name }.ifBlank { "Selected Album" }
-                                val ssidText = if (wifiSsid.isNotBlank()) " to '$wifiSsid'" else ""
-                                "IF device is $wifiState WiFi$ssidText THEN set active playlist to '$albumName'."
-                            }
-
                             else -> {
                                 "Please select at least one trigger to save this rule."
                             }
@@ -900,8 +1061,11 @@ fun AddRulePanel(
                         
                         val nameToUse = ruleName.ifBlank {
                             when {
+                                isUnlockEnabled && isHomeScreenEnabled -> "Unlock + Home Screen"
+                                isUnlockEnabled -> "On Device Unlock"
+                                isHomeScreenEnabled -> "On Home Screen"
                                 enabledCount >= 2 -> "Compound Rule ($connectionLogic)"
-                                isTimeEnabled -> "Schedule at $timeStr"
+                                isTimeEnabled -> "Schedule at ${formatTimeBySystem(timeStr, context)}"
                                 isLocationEnabled -> "Geofence rule"
                                 isIntervalEnabled -> "Interval every $intervalValText $intervalUnit"
                                 isWifiEnabled -> "WiFi rule"
@@ -909,17 +1073,22 @@ fun AddRulePanel(
                             }
                         }
                         
+                        val ruleType = when {
+                            isUnlockEnabled && isHomeScreenEnabled -> "Unlock" // Save primary as Unlock; service handles both
+                            isUnlockEnabled -> "Unlock"
+                            isHomeScreenEnabled -> "HomeScreen"
+                            enabledCount >= 2 -> "Compound"
+                            isTimeEnabled -> "Time"
+                            isLocationEnabled -> "Location"
+                            isIntervalEnabled -> "Interval"
+                            isWifiEnabled -> "WiFi"
+                            else -> "Time"
+                        }
+
                         val newRule = AutomationRule(
                             id = rule?.id ?: 0L,
                             name = nameToUse,
-                            type = when {
-                                enabledCount >= 2 -> "Compound"
-                                isTimeEnabled -> "Time"
-                                isLocationEnabled -> "Location"
-                                isIntervalEnabled -> "Interval"
-                                isWifiEnabled -> "WiFi"
-                                else -> "Time"
-                            },
+                            type = ruleType,
                             priority = rule?.priority ?: 0,
                             isEnabled = true,
                             daysOfWeek = if (isTimeEnabled) daysString else null,
@@ -937,11 +1106,13 @@ fun AddRulePanel(
                             intervalUnit = if (isIntervalEnabled) intervalUnit else null,
                             randomOrder = randomOrder,
                             wifiState = if (isWifiEnabled) wifiState else null,
-                            wifiSsid = if (isWifiEnabled && wifiSsid.isNotBlank()) wifiSsid else null
+                            wifiSsid = if (isWifiEnabled && wifiSsid.isNotBlank()) wifiSsid else null,
+                            lockCondition = if (isUnlockEnabled) lockCondition else null,
+                            homeScreenCondition = if (isHomeScreenEnabled) homeScreenCondition else null
                         )
                         onSave(newRule)
                     },
-                    enabled = isTimeEnabled || isLocationEnabled || isIntervalEnabled || isWifiEnabled,
+                    enabled = isTimeEnabled || isLocationEnabled || isIntervalEnabled || isWifiEnabled || isUnlockEnabled || isHomeScreenEnabled,
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                 ) {
@@ -984,8 +1155,13 @@ fun MapPickerWebView(
                     overflow: hidden;
                 }
                 #map {
-                    width: 100%;
-                    height: 100%;
+                    position: absolute !important;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    z-index: 0;
+                    background: ${if (isDark) "#121016" else "#ffffff"} !important;
                 }
                 ${if (isDark) """
                 .leaflet-tile-container {
@@ -1038,30 +1214,40 @@ fun MapPickerWebView(
                 var marker;
                 var circle;
                 try {
-                    map = L.map('map', { zoomControl: false }).setView([$initialLat, $initialLng], 13);
-                    L.control.zoom({ position: 'bottomright' }).addTo(map);
-                    
-                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                        maxZoom: 19,
-                        attribution: '© OpenStreetMap'
-                    }).addTo(map);
- 
-                    marker = L.marker([$initialLat, $initialLng], {draggable: true}).addTo(map);
-                    circle = L.circle([$initialLat, $initialLng], {
-                        color: '$primaryHex',
-                        fillColor: '$primaryHex',
-                        fillOpacity: 0.4,
-                        radius: $initialRadius
-                    }).addTo(map);
+
+                    console.log("MAP ELEMENT: L type is " + typeof L);
+                    if (typeof L !== 'undefined') {
+                        map = L.map('map', { zoomControl: false }).setView([$initialLat, $initialLng], 13);
+                        L.control.zoom({ position: 'bottomright' }).addTo(map);
+                        
+                        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png', {
+                            maxZoom: 19,
+                            attribution: '© OpenStreetMap contributors © CARTO'
+                        }).addTo(map);
+     
+                        marker = L.marker([$initialLat, $initialLng], {draggable: true}).addTo(map);
+                        circle = L.circle([$initialLat, $initialLng], {
+                            color: '$primaryHex',
+                            fillColor: '$primaryHex',
+                            fillOpacity: 0.4,
+                            radius: $initialRadius
+                        }).addTo(map);
+                        console.log("MAP ELEMENT: Map initialized at lat=[" + $initialLat + "], lng=[" + $initialLng + "], radius=[" + $initialRadius + "]");
+
+                    } else {
+                        console.error("MAP ELEMENT: L is NOT defined at initialization!");
+                    }
                 } catch (e) {
-                    console.error("Error during map init: " + e.message);
+                    console.error("MAP ELEMENT: Error during map init: " + e.message);
                 }
 
                 function adjustMapSize() {
                     var mapDiv = document.getElementById('map');
+                    console.log("MAP ELEMENT: adjustMapSize called. window.innerHeight=" + window.innerHeight + ", window.innerWidth=" + window.innerWidth);
                     if (mapDiv) {
                         mapDiv.style.height = window.innerHeight + 'px';
                         mapDiv.style.width = window.innerWidth + 'px';
+
                     }
                     if (map) {
                         map.invalidateSize();
@@ -1085,10 +1271,12 @@ fun MapPickerWebView(
                 }
 
                 function updateRadius(newRadius) {
+                    console.log("MAP ELEMENT: updateRadius called with radius=" + newRadius);
                     circle.setRadius(newRadius);
                 }
 
                 function updateMarkerPosition(lat, lng) {
+                    console.log("MAP ELEMENT: updateMarkerPosition called with lat=" + lat + ", lng=" + lng);
                     var latlng = L.latLng(lat, lng);
                     marker.setLatLng(latlng);
                     circle.setLatLng(latlng);
@@ -1100,11 +1288,13 @@ fun MapPickerWebView(
 
                 marker.on('dragend', function(e) {
                     var pos = marker.getLatLng();
+                    console.log("MAP ELEMENT: Marker drag ended at lat=" + pos.lat + ", lng=" + pos.lng);
                     circle.setLatLng(pos);
                     AndroidBridge.onLocationSelected(pos.lat, pos.lng);
                 });
 
                 map.on('click', function(e) {
+                    console.log("MAP ELEMENT: Map clicked at lat=" + e.latlng.lat + ", lng=" + e.latlng.lng);
                     updateLocation(e.latlng.lat, e.latlng.lng);
                     AndroidBridge.onLocationSelected(e.latlng.lat, e.latlng.lng);
                 });
@@ -1112,20 +1302,23 @@ fun MapPickerWebView(
                 function searchAddress() {
                     var query = document.getElementById('search-input').value;
                     if (!query) return;
+                    console.log("MAP ELEMENT: Searching address for query='" + query + "'");
                     fetch('https://nominatim.openstreetmap.org/search?format=json&q=' + encodeURIComponent(query))
                         .then(response => response.json())
                         .then(data => {
                             if (data && data.length > 0) {
                                 var lat = parseFloat(data[0].lat);
                                 var lon = parseFloat(data[0].lon);
+                                console.log("MAP ELEMENT: Search success, updating location to lat=" + lat + ", lon=" + lon);
                                 updateLocation(lat, lon);
                                 AndroidBridge.onLocationSelected(lat, lon);
                             } else {
+                                console.warn("MAP ELEMENT: Search location not found for query='" + query + "'");
                                 alert('Location not found');
                             }
                         })
                         .catch(err => {
-                            console.error(err);
+                            console.error("MAP ELEMENT: Error searching address: " + err);
                             alert('Error searching address');
                         });
                 }
@@ -1137,33 +1330,59 @@ fun MapPickerWebView(
 
     AndroidView(
         factory = { context ->
+            android.util.Log.i("MapPickerWebView", "MAP ELEMENT: WebView initializing at lat=$initialLat, lng=$initialLng, radius=$initialRadius")
             WebView(context).apply {
+                val bgColor = if (isDark) {
+                    android.graphics.Color.parseColor("#121016")
+                } else {
+                    android.graphics.Color.WHITE
+                }
+                setBackgroundColor(bgColor)
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
-                settings.userAgentString = "DynamicWallpaperManager/1.0 (contact@fostbyte.com) Mobile"
+                settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                settings.userAgentString = "${settings.userAgentString} DynamicWallpaperManager/1.0 (contact@fostbyte.com) Mobile"
                 webViewClient = object : android.webkit.WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
                         view?.evaluateJavascript("if (typeof adjustMapSize === 'function') { adjustMapSize(); }", null)
                     }
+
+                    override fun onReceivedError(view: WebView?, request: android.webkit.WebResourceRequest?, error: android.webkit.WebResourceError?) {
+                        super.onReceivedError(view, request, error)
+                        android.util.Log.e("MapPickerWebView", "MAP ELEMENT Error: Resource failed to load: ${request?.url} - error: ${error?.description} (code: ${error?.errorCode})")
+                    }
+
+                    override fun onReceivedHttpError(view: WebView?, request: android.webkit.WebResourceRequest?, errorResponse: android.webkit.WebResourceResponse?) {
+                        super.onReceivedHttpError(view, request, errorResponse)
+                        android.util.Log.e("MapPickerWebView", "MAP ELEMENT Error: HTTP error loading resource: ${request?.url} - status: ${errorResponse?.statusCode} (${errorResponse?.reasonPhrase})")
+                    }
                 }
                 webChromeClient = object : android.webkit.WebChromeClient() {
                     override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
-                        android.util.Log.d("MapWebViewConsole", "${consoleMessage?.messageLevel()}: ${consoleMessage?.message()} (at ${consoleMessage?.sourceId()}:${consoleMessage?.lineNumber()})")
+                        val msg = consoleMessage?.message() ?: ""
+                        if (msg.startsWith("MAP ELEMENT")) {
+                            android.util.Log.i("MapWebViewConsole", msg)
+                        } else {
+                            android.util.Log.i("MapWebViewConsole", "MAP ELEMENT Console: [${consoleMessage?.messageLevel()}] $msg (at ${consoleMessage?.sourceId()}:${consoleMessage?.lineNumber()})")
+                        }
                         return true
                     }
                 }
                 addJavascriptInterface(object {
                     @JavascriptInterface
                     fun onLocationSelected(lat: Double, lng: Double) {
+                        android.util.Log.i("MapPickerWebView", "MAP ELEMENT: User selected/dragged location to lat=$lat, lng=$lng")
                         onLocationSelected(lat, lng)
                     }
                 }, "AndroidBridge")
-                loadDataWithBaseURL("https://unpkg.com", htmlContent, "text/html", "UTF-8", null)
+                loadDataWithBaseURL("https://unpkg.com/", htmlContent, "text/html", "UTF-8", null)
             }
         },
         update = { webView ->
+            android.util.Log.i("MapPickerWebView", "MAP ELEMENT: App updating map radius=$initialRadius")
             webView.evaluateJavascript("if (typeof updateRadius === 'function') { updateRadius($initialRadius); }", null)
+            android.util.Log.i("MapPickerWebView", "MAP ELEMENT: App updating map position lat=$initialLat, lng=$initialLng")
             webView.evaluateJavascript("if (typeof updateMarkerPosition === 'function') { updateMarkerPosition($initialLat, $initialLng); }", null)
         },
         modifier = modifier
@@ -1214,4 +1433,3 @@ fun rememberWifiSsids(context: Context): List<String> {
         ssids
     }
 }
-
