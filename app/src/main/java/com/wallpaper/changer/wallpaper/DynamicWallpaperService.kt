@@ -197,14 +197,14 @@ class DynamicWallpaperService : WallpaperService() {
                 MotionEvent.ACTION_UP -> {
                     maxPointerCount = Math.max(maxPointerCount, event.pointerCount)
                     val duration = System.currentTimeMillis() - tapStartTime
-                    if (!isGestureCancelled && duration < 300L) {
+                    if (!isGestureCancelled && duration < 200L) {
                         recentTaps.add(TapInfo(System.currentTimeMillis(), maxPointerCount))
                         handler.removeCallbacks(gestureTimeoutRunnable)
                         
                         if (recentTaps.size >= 2) {
                             processRecentTaps()
                         } else {
-                            handler.postDelayed(gestureTimeoutRunnable, 200) // 200ms window
+                            handler.postDelayed(gestureTimeoutRunnable, 150) // 150ms window
                         }
                     }
                 }
@@ -231,7 +231,7 @@ class DynamicWallpaperService : WallpaperService() {
                     if (commandTaps.size >= 2) {
                         processCommandTaps()
                     } else {
-                        handler.postDelayed(commandTapsRunnable, 200L) // 200ms window
+                        handler.postDelayed(commandTapsRunnable, 150L) // 150ms window
                     }
                 }
             }

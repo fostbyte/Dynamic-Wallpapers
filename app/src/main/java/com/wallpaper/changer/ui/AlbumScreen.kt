@@ -1135,12 +1135,11 @@ fun AlbumItemCard(
                         modifier = Modifier.size(16.dp)
                     )
                 }
-
-                Spacer(modifier = Modifier.width(4.dp))
-
                 // Vault toggle button
-                IconButton(
-                    onClick = {
+                if (isVaulted) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    IconButton(
+                        onClick = {
                         if (album.isHidden) {
                             if (!isVaulted) {
                                 // Already unlocked this session — offer to remove vault
@@ -1166,6 +1165,7 @@ fun AlbumItemCard(
                         modifier = Modifier.size(16.dp)
                     )
                 }
+            }
             }
 
             Column(

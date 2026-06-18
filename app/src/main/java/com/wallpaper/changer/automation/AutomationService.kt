@@ -472,13 +472,20 @@ class AutomationService : Service() {
         rotateWallpaper(listOf(albumId), false, false, updateStatic)
     }
 
-    suspend fun rotateFavorites(random: Boolean = false, isForward: Boolean = true, updateStatic: Boolean = true) {
+    suspend fun rotateFavorites(random: Boolean = false, isForward: Boolean = true, updateStatic: Boolean = true, albumIds: List<Long>? = null) {
         withContext(Dispatchers.IO) {
-            val allPhotos = database.photoDao().getFavoritePhotos()
+            // Scope favorites to the current active playlist albums
+            val activeIds = albumIds ?: getActiveAlbumIds()
+            val allPhotos = if (activeIds.isNotEmpty()) {
+                activeIds.flatMap { id -> database.photoDao().getPhotosForAlbum(id) }
+                    .filter { it.isFavorite }
+            } else {
+                database.photoDao().getFavoritePhotos()
+            }
             if (allPhotos.isEmpty()) {
-                Log.d(TAG, "No favorite photos, cannot rotate")
+                Log.d(TAG, "No favorite photos in active albums, cannot rotate")
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(applicationContext, "No favorites added yet! Add some to run this rule.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(applicationContext, "No favorites in current playlist! Add some to run this rule.", Toast.LENGTH_SHORT).show()
                 }
                 return@withContext
             }
