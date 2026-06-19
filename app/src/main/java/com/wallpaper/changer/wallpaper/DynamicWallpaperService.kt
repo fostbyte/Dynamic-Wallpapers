@@ -59,6 +59,20 @@ class DynamicWallpaperService : WallpaperService() {
         private var decodedWidth: Int = -1
         private var decodedHeight: Int = -1
         
+        private var doubleTapAction = "NextPhoto"
+        private var twoFingerAction = "Freeze"
+        private var threeFingerAction = "NextPhoto"
+
+        // Call this in onCreate and whenever settings change
+        private fun loadGestureSettings() {
+            CoroutineScope(Dispatchers.IO).launch {
+                val db = (application as WallpaperChangerApplication).database
+                doubleTapAction = db.appSettingDao().getSetting("gesture_DoubleTap")?.value ?: "NextPhoto"
+                twoFingerAction = db.appSettingDao().getSetting("gesture_TwoFingerDoubleTap")?.value ?: "Freeze"
+                threeFingerAction = db.appSettingDao().getSetting("gesture_ThreeFingerDoubleTap")?.value ?: "NextPhoto"
+            }
+        }
+        
         // Gesture variables
         private var tapStartTime = 0L
         private var maxPointerCount = 1
@@ -106,6 +120,7 @@ class DynamicWallpaperService : WallpaperService() {
                     if (path != null) {
                         updateWallpaper(path, mode, dimming = dimming, blur = blur, greyscale = greyscale)
                     }
+                    loadGestureSettings()
                 }
             }
         }
@@ -298,19 +313,13 @@ class DynamicWallpaperService : WallpaperService() {
         }
 
         private fun processRecentTaps() {
-            val taps = recentTaps.size
-            if (taps == 0) {
-                recentTaps.clear()
-                return
-            }
             val fingers = recentTaps.maxOf { it.fingers }
             recentTaps.clear()
 
-            Log.d(TAG, "Processed taps: count=$taps, fingers=$fingers")
-            val gestureType = when {
-                fingers == 1 && taps == 2 -> "DoubleTap"
-                fingers == 2 && taps == 2 -> "TwoFingerDoubleTap"
-                fingers == 3 && taps == 2 -> "ThreeFingerDoubleTap"
+            val gestureType = when (fingers) {
+                1 -> "DoubleTap"
+                2 -> "TwoFingerDoubleTap"
+                3 -> "ThreeFingerDoubleTap"
                 else -> null
             }
 
