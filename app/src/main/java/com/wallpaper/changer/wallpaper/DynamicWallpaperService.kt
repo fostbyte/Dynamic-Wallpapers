@@ -63,6 +63,10 @@ class DynamicWallpaperService : WallpaperService() {
         private var twoFingerAction = "Freeze"
         private var threeFingerAction = "NextPhoto"
 
+        // For handling delayed wallpaper change when screen is off
+        private var pendingWallpaperPath: String? = null
+        private var pendingScalingMode: String? = null
+
         // Call this in onCreate and whenever settings change
         private fun loadGestureSettings() {
             CoroutineScope(Dispatchers.IO).launch {
@@ -111,6 +115,12 @@ class DynamicWallpaperService : WallpaperService() {
         private val wallpaperReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == ACTION_UPDATE_WALLPAPER) {
+                    if(!isVisible){
+                        // Store the pending path but don't decode/draw yet
+                        pendingWallpaperPath = intent.getStringExtra(EXTRA_WALLPAPER_PATH)
+                        pendingScalingMode = intent.getStringExtra(EXTRA_SCALING_MODE) ?: "Fill"
+                        return  // Skip all the heavy work
+                    }
                     val path = intent.getStringExtra(EXTRA_WALLPAPER_PATH)
                     val mode = intent.getStringExtra(EXTRA_SCALING_MODE) ?: "Fill"
                     val dimming = intent.getIntExtra("dimming_percent", 0)
@@ -161,7 +171,15 @@ class DynamicWallpaperService : WallpaperService() {
         override fun onVisibilityChanged(visible: Boolean) {
             super.onVisibilityChanged(visible)
             if (visible) {
-                drawFrame()
+                loadGestureSettings()
+                // If there's a pending wallpaper, load and draw it now
+                pendingWallpaperPath?.let {
+                    val mode = pendingScalingMode ?: "Fill"
+                    // Note: We don't pass dimming/blur/greyscale as they might not be in the pending data
+                    updateWallpaper(it, mode)
+                    pendingWallpaperPath = null
+                    pendingScalingMode = null
+                } ?: drawFrame()
                 Log.d(TAG, "Wallpaper visible, broadcasting action homescreen")
                 val intent = Intent("com.wallpaper.changer.ACTION_HOMESCREEN").apply {
                     setPackage(packageName)
