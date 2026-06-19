@@ -1135,7 +1135,7 @@ fun AlbumItemCard(
                         modifier = Modifier.size(16.dp)
                     )
                 }
-
+if (isVaulted){
                 Spacer(modifier = Modifier.width(4.dp))
 
                 // Vault toggle button
@@ -1167,6 +1167,7 @@ fun AlbumItemCard(
                     )
                 }
             }
+        }
 
             Column(
                 modifier = Modifier
