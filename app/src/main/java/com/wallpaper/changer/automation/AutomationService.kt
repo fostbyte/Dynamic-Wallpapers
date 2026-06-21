@@ -614,7 +614,13 @@ class AutomationService : Service() {
     private fun applyStaticWallpaper(path: String) {
         val wallpaperManager = WallpaperManager.getInstance(applicationContext)
         val isLiveActive = try {
-            wallpaperManager.wallpaperInfo?.packageName == packageName
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val sysInfo = wallpaperManager.getWallpaperInfo(WallpaperManager.FLAG_SYSTEM)
+                val lockInfo = wallpaperManager.getWallpaperInfo(WallpaperManager.FLAG_LOCK)
+                sysInfo?.packageName == packageName || lockInfo?.packageName == packageName
+            } else {
+                wallpaperManager.wallpaperInfo?.packageName == packageName
+            }
         } catch (e: Exception) {
             false
         }
@@ -635,16 +641,33 @@ class AutomationService : Service() {
                         BitmapFactory.decodeFile(path)
                     } ?: return@launch
                     
+                    val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        val hasSeparateLock = try {
+                            val lockId = wallpaperManager.getWallpaperId(WallpaperManager.FLAG_LOCK)
+                            val sysId = wallpaperManager.getWallpaperId(WallpaperManager.FLAG_SYSTEM)
+                            lockId > 0 && lockId != sysId
+                        } catch (e: Exception) {
+                            false
+                        }
+                        if (hasSeparateLock) {
+                            WallpaperManager.FLAG_SYSTEM
+                        } else {
+                            WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK
+                        }
+                    } else {
+                        0
+                    }
+
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                         try {
-                            wallpaperManager.setBitmap(bitmap, null, true, WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK)
+                            wallpaperManager.setBitmap(bitmap, null, true, flags)
                         } catch (e: Exception) {
                             wallpaperManager.setBitmap(bitmap)
                         }
                     } else {
                         wallpaperManager.setBitmap(bitmap)
                     }
-                    Log.d(TAG, "Successfully updated static wallpaper for both screens")
+                    Log.d(TAG, "Successfully updated static wallpaper. Flags used: $flags")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error applying static wallpaper: ${e.message}")

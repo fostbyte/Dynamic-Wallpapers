@@ -685,6 +685,7 @@ fun SettingsScreen(database: AppDatabase) {
             )
         }
 
+
         // Change Photo on Unlock
         Row(
             modifier = Modifier.fillMaxWidth(),
