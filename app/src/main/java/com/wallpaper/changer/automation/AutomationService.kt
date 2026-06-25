@@ -198,6 +198,7 @@ class AutomationService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "AutomationService started onStartCommand")
         setupLocationTracking()
+        setupWifiTracking()
         val forceRotate = intent?.getBooleanExtra("force_rotate", false) == true
         val applyWallpaper = intent?.getBooleanExtra("apply_wallpaper", false) == true
         val prevPhoto = intent?.getBooleanExtra("prev_photo", false) == true
@@ -880,6 +881,11 @@ class AutomationService : Service() {
         
         updateNotification("Active Rule: ${rule.name}")
         
+        Log.d(TAG, "${rule.actionType} has fired for ${rule.name}")
+        withContext(Dispatchers.Main) {
+            Toast.makeText(applicationContext, "${rule.actionType} has fired for ${rule.name}", Toast.LENGTH_SHORT).show()
+        }
+        
         // Save active rule filters to database
         database.appSettingDao().insertSetting(AppSetting("active_rule_dimming", (rule.dimmingPercent ?: 0).toString()))
         database.appSettingDao().insertSetting(AppSetting("active_rule_blur", (rule.blurPercent ?: 0).toString()))
@@ -1141,6 +1147,7 @@ class AutomationService : Service() {
     }
 
     private fun setupWifiTracking() {
+        stopWifiTracking()
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         connectivityManager = cm
         
@@ -1153,24 +1160,48 @@ class AutomationService : Service() {
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .build()
             
-        networkCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                super.onAvailable(network)
-                Log.d(TAG, "WiFi Connected")
-                if (!isWifiConnected) {
-                    isWifiConnected = true
-                    handleWifiEvent("Connecting")
-                    evaluateScheduledRules()
+        networkCallback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            object : ConnectivityManager.NetworkCallback(ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO) {
+                override fun onAvailable(network: Network) {
+                    super.onAvailable(network)
+                    Log.d(TAG, "WiFi Connected")
+                    if (!isWifiConnected) {
+                        isWifiConnected = true
+                        handleWifiEvent("Connecting")
+                        evaluateScheduledRules()
+                    }
+                }
+                
+                override fun onLost(network: Network) {
+                    super.onLost(network)
+                    Log.d(TAG, "WiFi Disconnected")
+                    if (isWifiConnected) {
+                        isWifiConnected = false
+                        handleWifiEvent("Disconnecting")
+                        evaluateScheduledRules()
+                    }
                 }
             }
-            
-            override fun onLost(network: Network) {
-                super.onLost(network)
-                Log.d(TAG, "WiFi Disconnected")
-                if (isWifiConnected) {
-                    isWifiConnected = false
-                    handleWifiEvent("Disconnecting")
-                    evaluateScheduledRules()
+        } else {
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    super.onAvailable(network)
+                    Log.d(TAG, "WiFi Connected")
+                    if (!isWifiConnected) {
+                        isWifiConnected = true
+                        handleWifiEvent("Connecting")
+                        evaluateScheduledRules()
+                    }
+                }
+                
+                override fun onLost(network: Network) {
+                    super.onLost(network)
+                    Log.d(TAG, "WiFi Disconnected")
+                    if (isWifiConnected) {
+                        isWifiConnected = false
+                        handleWifiEvent("Disconnecting")
+                        evaluateScheduledRules()
+                    }
                 }
             }
         }

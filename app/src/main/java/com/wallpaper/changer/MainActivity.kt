@@ -432,6 +432,18 @@ fun PermissionRequester() {
             } else {
                 permissions[Manifest.permission.READ_EXTERNAL_STORAGE] == true
             }
+            if (hasLocation) {
+                try {
+                    val serviceIntent = Intent(context, AutomationService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(serviceIntent)
+                    } else {
+                        context.startService(serviceIntent)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
             if (!hasLocation || !hasStorage) {
                 Toast.makeText(context, "Storage and Location access are required for full automation rules.", Toast.LENGTH_LONG).show()
             }
