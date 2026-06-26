@@ -1331,6 +1331,12 @@ fun PhotoManagementHeader(albumId: Long, onPhotosAdded: () -> Unit, database: Ap
     var pendingFolderPhotos by remember { mutableStateOf<List<Photo>>(emptyList()) }
     var showFolderDuplicateDialog by remember { mutableStateOf(false) }
 
+    var showGooglePhotosDialog by remember { mutableStateOf(false) }
+    var googlePhotosUrlInput by remember { mutableStateOf("") }
+    var isDownloadingGooglePhotos by remember { mutableStateOf(false) }
+    var downloadProgressText by remember { mutableStateOf("") }
+
+
     // Multi-photo picker launcher (visual file select UI for standard Photos/Images)
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(),
@@ -1469,7 +1475,7 @@ fun PhotoManagementHeader(albumId: Long, onPhotosAdded: () -> Unit, database: Ap
                     )
                 },
                 modifier = Modifier.weight(1f),
-                enabled = !isScanning
+                enabled = !isScanning && !isDownloadingGooglePhotos
             ) {
                 Icon(Icons.Default.Image, contentDescription = "Add Photos")
                 Spacer(modifier = Modifier.width(4.dp))
@@ -1480,12 +1486,25 @@ fun PhotoManagementHeader(albumId: Long, onPhotosAdded: () -> Unit, database: Ap
             Button(
                 onClick = { folderPickerLauncher.launch(null) },
                 modifier = Modifier.weight(1f),
-                enabled = !isScanning
+                enabled = !isScanning && !isDownloadingGooglePhotos
             ) {
                 Icon(Icons.Default.Folder, contentDescription = "Select Folder")
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("Select Folder")
             }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Google Photos Album Picker button
+        Button(
+            onClick = { showGooglePhotosDialog = true },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !isScanning && !isDownloadingGooglePhotos
+        ) {
+            Icon(Icons.Default.Add, contentDescription = "Import Google Photos")
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("Import Google Photos Album")
         }
 
         if (isScanning) {
@@ -1499,6 +1518,94 @@ fun PhotoManagementHeader(albumId: Long, onPhotosAdded: () -> Unit, database: Ap
             )
         }
     }
+
+    if (showGooglePhotosDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!isDownloadingGooglePhotos) showGooglePhotosDialog = false },
+            title = { Text("Import Google Photos Album") },
+            text = {
+                Column {
+                    Text("Enter Google Photos Shared Album Link:")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = googlePhotosUrlInput,
+                        onValueChange = { googlePhotosUrlInput = it },
+                        placeholder = { Text("https://photos.app.goo.gl/...") },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isDownloadingGooglePhotos
+                    )
+                    if (isDownloadingGooglePhotos) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = downloadProgressText,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            isDownloadingGooglePhotos = true
+                            downloadProgressText = "Fetching Google Photos Album..."
+                            
+                            val imageUrls = withContext(Dispatchers.IO) {
+                                fetchGooglePhotosAlbumImageUrls(googlePhotosUrlInput)
+                            }
+                            
+                            if (imageUrls.isEmpty()) {
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(context, "No photos found or failed to fetch album.", Toast.LENGTH_LONG).show()
+                                    isDownloadingGooglePhotos = false
+                                }
+                                return@launch
+                            }
+                            
+                            val addedPhotos = mutableListOf<Photo>()
+                            withContext(Dispatchers.IO) {
+                                imageUrls.forEachIndexed { index, url ->
+                                    withContext(Dispatchers.Main) {
+                                        downloadProgressText = "Downloading photo ${index + 1} of ${imageUrls.size}..."
+                                    }
+                                    val cachedPath = downloadPhotoFromUrl(context, url, albumId)
+                                    if (cachedPath != null) {
+                                        addedPhotos.add(Photo(albumId = albumId, path = cachedPath))
+                                    }
+                                }
+                                if (addedPhotos.isNotEmpty()) {
+                                    database.photoDao().insertAll(addedPhotos)
+                                }
+                            }
+                            
+                            withContext(Dispatchers.Main) {
+                                isDownloadingGooglePhotos = false
+                                showGooglePhotosDialog = false
+                                googlePhotosUrlInput = ""
+                                onPhotosAdded()
+                                Toast.makeText(context, "Successfully imported ${addedPhotos.size} photos!", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    enabled = googlePhotosUrlInput.isNotBlank() && !isDownloadingGooglePhotos
+                ) {
+                    Text("Import")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showGooglePhotosDialog = false },
+                    enabled = !isDownloadingGooglePhotos
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
 
     if (showDuplicateDialog) {
         AlertDialog(
@@ -1716,3 +1823,83 @@ fun PhotoGridCard(photo: Photo, onClick: () -> Unit, onDelete: () -> Unit) {
         }
     }
 }
+
+fun fetchGooglePhotosAlbumImageUrls(albumUrl: String): List<String> {
+    var urlConnection: java.net.HttpURLConnection? = null
+    try {
+        var currentUrl = albumUrl
+        var redirects = 0
+        while (redirects < 5) {
+            val url = java.net.URL(currentUrl)
+            urlConnection = url.openConnection() as java.net.HttpURLConnection
+            urlConnection.instanceFollowRedirects = false
+            urlConnection.readTimeout = 10000
+            urlConnection.connectTimeout = 10000
+            urlConnection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            
+            val status = urlConnection.responseCode
+            if (status == java.net.HttpURLConnection.HTTP_MOVED_TEMP || 
+                status == java.net.HttpURLConnection.HTTP_MOVED_PERM || 
+                status == 307 || status == 308) {
+                val newUrl = urlConnection.getHeaderField("Location")
+                if (newUrl != null) {
+                    currentUrl = newUrl
+                    redirects++
+                    continue
+                }
+            }
+            break
+        }
+        
+        val url = java.net.URL(currentUrl)
+        urlConnection = url.openConnection() as java.net.HttpURLConnection
+        urlConnection.readTimeout = 15000
+        urlConnection.connectTimeout = 15000
+        urlConnection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        
+        val html = urlConnection.inputStream.bufferedReader().use { it.readText() }
+        val regex = """https://lh3\.googleusercontent\.com/(?:pw/)?[a-zA-Z0-9_\-]+""".toRegex()
+        val matches = regex.findAll(html).map { it.value }.toSet()
+        return matches.filter { it.length > 80 }.toList()
+    } catch (e: Exception) {
+        e.printStackTrace()
+        return emptyList()
+    } finally {
+        urlConnection?.disconnect()
+    }
+}
+
+fun downloadPhotoFromUrl(context: android.content.Context, imageUrl: String, albumId: Long): String? {
+    try {
+        val downloadUrl = if (imageUrl.contains("=")) {
+            imageUrl.substringBeforeLast("=") + "=w2048-h2048"
+        } else {
+            "$imageUrl=w2048-h2048"
+        }
+        
+        val url = java.net.URL(downloadUrl)
+        val conn = url.openConnection() as java.net.HttpURLConnection
+        conn.readTimeout = 15000
+        conn.connectTimeout = 15000
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+        
+        val photosDir = File(context.filesDir, "photos")
+        if (!photosDir.exists()) {
+            photosDir.mkdirs()
+        }
+        
+        val fileName = "gphotos_${albumId}_${System.currentTimeMillis()}_${(0..1000).random()}.jpg"
+        val destFile = File(photosDir, fileName)
+        
+        conn.inputStream.use { inputStream ->
+            destFile.outputStream().use { outputStream ->
+                inputStream.copyTo(outputStream)
+            }
+        }
+        return destFile.absolutePath
+    } catch (e: Exception) {
+        e.printStackTrace()
+        return null
+    }
+}
+
